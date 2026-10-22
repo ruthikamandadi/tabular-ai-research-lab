@@ -1,0 +1,27 @@
+# Runtime
+fastapi==0.156.8
+uvicorn==0.54.0
+python-multipart==0.0.32
+pydantic==2.14.1
+python-dotenv==1.2.4
+chardet==7.7.0
+
+# Data and machine learning
+pandas==2.3.3
+numpy==2.5.4
+scikit-learn==1.9.1
+scipy==1.18.1
+joblib==1.6.0
+torch==2.14.1
+xgboost==3.4.1
+shap==0.54.1
+kaggle==2.2.4
+sdv==2.0.0
+ctgan==0.12.1
+copulas==0.14.1
+
+# Persistence and tests
+SQLAlchemy==2.1.5
+pytest==9.1.1
+httpx==0.28.1
+httpx2==2.16.0

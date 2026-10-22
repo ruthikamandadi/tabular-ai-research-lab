@@ -1,0 +1,25 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Node
+node_modules/
+frontend/dist/
+
+# Local configuration and generated model data
+.env
+backend/storage/
+backend/storage/kaggle.json
+data/uploads/
+data/artifacts/
+data/reports/
+data/tabular_lab.db
+data/**/*.csv
+data/**/*.xlsx
+data/**/*.parquet
+*.joblib
+*.pkl
+*.pt
