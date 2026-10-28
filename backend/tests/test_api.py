@@ -838,3 +838,332 @@ def test_pytorch_mlp_training_status_poll(client):
 
     assert terminal, "PyTorch MLP training timed out"
 
+
+def make_demo_churn_csv():
+    rows = []
+    for index in range(120):
+        tenure = (index * 11) % 72 + 1
+        monthly_charges = 35 + ((index * 7) % 20) * 5
+        contract = (
+            "month-to-month"
+            if index % 5 < 3
+            else ("one-year" if index % 5 == 3 else "two-year")
+        )
+        support_calls = (index * 7) % 8
+        internet = ["fiber", "dsl", "no"][index % 3]
+        churn = (
+            "Yes"
+            if (contract == "month-to-month" and support_calls >= 3)
+            or (tenure < 10 and monthly_charges > 80)
+            else "No"
+        )
+        rows.append(
+            {
+                "tenure_months": tenure,
+                "monthly_charges": float(f"{monthly_charges:.2f}"),
+                "total_charges": float(f"{(tenure * monthly_charges):.2f}"),
+                "contract_type": contract,
+                "internet_service": internet,
+                "payment_method": ["electronic", "credit_card", "bank_transfer"][
+                    index % 3
+                ],
+                "num_support_calls": support_calls,
+                "tech_support": "yes" if index % 2 == 0 else "no",
+                "senior_citizen": 1 if index % 4 == 0 else 0,
+                "churn": churn,
+            }
+        )
+    buffer = io.StringIO()
+    pd.DataFrame(rows).to_csv(buffer, index=False)
+    return buffer.getvalue().encode("utf-8")
+
+
+def test_e2e_demo_churn_full_workflow(unauthenticated_client, monkeypatch, tmp_path):
+    import builtins
+    import os
+    from types import SimpleNamespace
+    from app.api import kaggle
+
+    # 1. Register
+    reg_res = unauthenticated_client.post(
+        "/api/auth/register",
+        json={
+            "name": "E2E Churn Tester",
+            "email": "churn_e2e_user@example.com",
+            "password": "SecurePassword123!",
+            "confirm_password": "SecurePassword123!",
+        },
+    )
+    assert reg_res.status_code == 201, reg_res.text
+
+    # 2. Login
+    login_res = unauthenticated_client.post(
+        "/api/auth/login",
+        json={
+            "email": "churn_e2e_user@example.com",
+            "password": "SecurePassword123!",
+        },
+    )
+    assert login_res.status_code == 200, login_res.text
+
+    # 3. Upload 120-row demo churn dataset
+    churn_bytes = make_demo_churn_csv()
+    upload_res = unauthenticated_client.post(
+        "/api/datasets/upload",
+        files={"file": ("demo_churn_120.csv", churn_bytes, "text/csv")},
+    )
+    assert upload_res.status_code == 200, upload_res.text
+    dataset = upload_res.json()
+    dataset_id = dataset["id"]
+    assert dataset["row_count"] == 120
+
+    # 4. Data profile
+    profile_res = unauthenticated_client.get(f"/api/datasets/{dataset_id}/profile")
+    assert profile_res.status_code == 200, profile_res.text
+    profile = profile_res.json()
+    assert profile["n_rows"] == 120
+    assert "columns" in profile
+
+    # 5. Confirm target (churn, classification)
+    suggest_res = unauthenticated_client.post(
+        f"/api/datasets/{dataset_id}/suggest-task",
+        json={"target_column": "churn"},
+    )
+    assert suggest_res.status_code == 200, suggest_res.text
+    assert suggest_res.json()["suggestion"] == "binary_classification"
+
+    dist_res = unauthenticated_client.get(
+        f"/api/datasets/{dataset_id}/target-distribution?target_column=churn&task_type=binary_classification"
+    )
+    assert dist_res.status_code == 200, dist_res.text
+    dist = dist_res.json()
+    assert dist["type"] == "categorical"
+    assert "counts" in dist
+
+    # 6. Preprocessing config
+    prep_cfg = {
+        "test_size": 0.2,
+        "random_seed": 42,
+        "numeric_imputer": "median",
+        "numeric_scaler": "standard",
+        "categorical_imputer": "most_frequent",
+        "categorical_encoding": "onehot",
+        "drop_identifiers": True,
+    }
+
+    # 7. Train Logistic Regression and Random Forest
+    lr_res = unauthenticated_client.post(
+        "/api/experiments",
+        json={
+            "dataset_id": dataset_id,
+            "target_column": "churn",
+            "task_type": "binary_classification",
+            "model_id": "logistic_regression",
+            "model_config": {"max_iter": 300},
+            "preprocessing_config": prep_cfg,
+            "random_seed": 42,
+        },
+    )
+    assert lr_res.status_code == 200, lr_res.text
+    lr_exp_id = lr_res.json()["experiment_id"]
+
+    rf_res = unauthenticated_client.post(
+        "/api/experiments",
+        json={
+            "dataset_id": dataset_id,
+            "target_column": "churn",
+            "task_type": "binary_classification",
+            "model_id": "random_forest",
+            "model_config": {"n_estimators": 40, "max_depth": 6},
+            "preprocessing_config": prep_cfg,
+            "random_seed": 42,
+        },
+    )
+    assert rf_res.status_code == 200, rf_res.text
+    rf_exp_id = rf_res.json()["experiment_id"]
+
+    # Poll status for both models
+    for exp_id in (lr_exp_id, rf_exp_id):
+        deadline = time.monotonic() + 30
+        finished = False
+        while time.monotonic() < deadline:
+            st = unauthenticated_client.get(f"/api/experiments/{exp_id}/status")
+            assert st.status_code == 200, st.text
+            status_data = st.json()
+            if status_data["status"] in ("completed", "failed"):
+                assert status_data["status"] == "completed", status_data
+                finished = True
+                break
+            time.sleep(0.1)
+        assert finished, f"Experiment {exp_id} did not finish in time"
+
+    # 8. List experiments
+    list_res = unauthenticated_client.get("/api/experiments")
+    assert list_res.status_code == 200, list_res.text
+    exp_ids = {e["id"] for e in list_res.json()}
+    assert {lr_exp_id, rf_exp_id} <= exp_ids
+
+    # 9. Metrics (accuracy, F1, ROC-AUC)
+    lr_exp = unauthenticated_client.get(f"/api/experiments/{lr_exp_id}").json()
+    assert lr_exp["metrics"] is not None
+    assert "accuracy" in lr_exp["metrics"]
+    assert "f1" in lr_exp["metrics"]
+    assert "roc_auc" in lr_exp["metrics"]
+
+    rf_exp = unauthenticated_client.get(f"/api/experiments/{rf_exp_id}").json()
+    assert rf_exp["metrics"] is not None
+    assert "accuracy" in rf_exp["metrics"]
+    assert "f1" in rf_exp["metrics"]
+    assert "roc_auc" in rf_exp["metrics"]
+
+    # 10. Feature importance and SHAP
+    shap_res = unauthenticated_client.get(f"/api/experiments/{lr_exp_id}/explanations")
+    assert shap_res.status_code == 200, shap_res.text
+    shap_data = shap_res.json()
+    assert "importances" in shap_data
+    assert len(shap_data["importances"]) > 0
+    assert "method" in shap_data
+
+    # 11. Single prediction
+    single_res = unauthenticated_client.post(
+        f"/api/models/{lr_exp_id}/predict-single",
+        json={
+            "features": {
+                "tenure_months": 12,
+                "monthly_charges": 65.0,
+                "total_charges": 780.0,
+                "contract_type": "month-to-month",
+                "internet_service": "fiber",
+                "payment_method": "electronic",
+                "num_support_calls": 4,
+                "tech_support": "no",
+                "senior_citizen": 0,
+            }
+        },
+    )
+    assert single_res.status_code == 200, single_res.text
+    single_data = single_res.json()
+    assert "prediction" in single_data
+
+    # 12. Batch CSV prediction (file picker, FormData field "file", blob download)
+    batch_rows = [
+        {
+            "tenure_months": 24,
+            "monthly_charges": 45.0,
+            "total_charges": 1080.0,
+            "contract_type": "one-year",
+            "internet_service": "dsl",
+            "payment_method": "credit_card",
+            "num_support_calls": 1,
+            "tech_support": "yes",
+            "senior_citizen": 0,
+        },
+        {
+            "tenure_months": 2,
+            "monthly_charges": 95.0,
+            "total_charges": 190.0,
+            "contract_type": "month-to-month",
+            "internet_service": "fiber",
+            "payment_method": "electronic",
+            "num_support_calls": 5,
+            "tech_support": "no",
+            "senior_citizen": 0,
+        },
+    ]
+    batch_bytes = make_csv(batch_rows)
+    batch_res = unauthenticated_client.post(
+        f"/api/models/{lr_exp_id}/predict-csv",
+        files={"file": ("batch_input.csv", batch_bytes, "text/csv")},
+    )
+    assert batch_res.status_code == 200, batch_res.text
+    assert "text/csv" in batch_res.headers.get("content-type", "")
+    assert "prediction" in batch_res.text
+
+    # 13. HTML and JSON report
+    html_res = unauthenticated_client.get(f"/api/reports/{lr_exp_id}/html")
+    assert html_res.status_code == 200, html_res.text
+    assert "text/html" in html_res.headers.get("content-type", "")
+    assert "<html" in html_res.text.lower()
+
+    json_res = unauthenticated_client.get(f"/api/reports/{lr_exp_id}/json")
+    assert json_res.status_code == 200, json_res.text
+    report_json = json_res.json()
+    assert report_json["id"] == lr_exp_id
+    assert "metrics" in report_json
+
+    # 14. Compare two experiments
+    comp_res = unauthenticated_client.get(
+        f"/api/reports/compare/csv?ids={lr_exp_id},{rf_exp_id}"
+    )
+    assert comp_res.status_code == 200, comp_res.text
+    assert "text/csv" in comp_res.headers.get("content-type", "")
+    assert lr_exp_id in comp_res.text
+    assert rf_exp_id in comp_res.text
+
+    # 15. Bootstrap synthetic data
+    synth_res = unauthenticated_client.post(
+        f"/api/datasets/{dataset_id}/synthesize",
+        json={"method": "bootstrap", "num_rows": 40},
+    )
+    assert synth_res.status_code == 200, synth_res.text
+    job_id = synth_res.json()["job_id"]
+
+    deadline = time.monotonic() + 15
+    synth_done = False
+    while time.monotonic() < deadline:
+        s_poll = unauthenticated_client.get(f"/api/datasets/synthesis/{job_id}/status")
+        assert s_poll.status_code == 200, s_poll.text
+        s_data = s_poll.json()
+        if s_data["status"] in ("completed", "failed"):
+            assert s_data["status"] == "completed", s_data
+            synth_done = True
+            break
+        time.sleep(0.1)
+    assert synth_done
+
+    # 16. Kaggle credentials save and test (mocked)
+    from app.core import config
+
+    creds_path = tmp_path / "storage" / "kaggle.json"
+    monkeypatch.setattr(config, "KAGGLE_CREDENTIALS_PATH", creds_path)
+    monkeypatch.setattr(kaggle, "KAGGLE_CREDENTIALS_PATH", creds_path)
+    monkeypatch.delenv("KAGGLE_USERNAME", raising=False)
+    monkeypatch.delenv("KAGGLE_KEY", raising=False)
+
+    save_kaggle_res = unauthenticated_client.post(
+        "/api/settings/kaggle",
+        json={"username": "churn_researcher", "key": "kaggle_secret_key_123"},
+    )
+    assert save_kaggle_res.status_code == 200, save_kaggle_res.text
+    assert save_kaggle_res.json()["masked_key"].startswith("ka")
+
+    class MockKaggleClient:
+        def authenticate(self):
+            pass
+
+        def dataset_list(self, page):
+            return []
+
+    original_import = builtins.__import__
+
+    def mock_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "kaggle.api.kaggle_api_extended":
+            return SimpleNamespace(KaggleApi=MockKaggleClient)
+        return original_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", mock_import)
+    test_kaggle_res = unauthenticated_client.post("/api/settings/kaggle/test")
+    assert test_kaggle_res.status_code == 200, test_kaggle_res.text
+    assert test_kaggle_res.json()["ok"] is True
+
+    # 17. Delete dataset
+    del_res = unauthenticated_client.delete(f"/api/datasets/{dataset_id}")
+    assert del_res.status_code == 200, del_res.text
+    assert del_res.json()["ok"] is True
+
+    # 18. Logout
+    logout_res = unauthenticated_client.post("/api/auth/logout")
+    assert logout_res.status_code == 200, logout_res.text
+    assert logout_res.json()["message"] in ("Signed out.", "Logged out")
+
+

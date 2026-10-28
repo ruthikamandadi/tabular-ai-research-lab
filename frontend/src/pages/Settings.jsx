@@ -32,7 +32,7 @@ export default function SettingsPage() {
       } catch (requestError) {
         if (requestId !== loadRequestId.current) return;
         const status = requestError.response?.status;
-        const retryable = !requestError.response || status === 502 || status === 504 ||
+        const retryable = !requestError.response || status >= 500 ||
           /network error/i.test(requestError.message || '');
         if (!retryable || retry === 20) {
           const fallback = 'Backend not reachable. Start it with: python -m uvicorn app.main:app --reload (in the backend folder)';
@@ -182,11 +182,7 @@ export default function SettingsPage() {
               <RefreshCw size={14} className={loading ? 'animate-spin' : ''} /> Refresh
             </button>
           </div>
-          {loading && !waitingForBackend ? (
-            <div className="mt-4 space-y-3" aria-label="Loading capabilities">
-              {[...Array(4)].map((_, index) => <div key={index} className="skeleton h-12 rounded-lg" />)}
-            </div>
-          ) : waitingForBackend ? (
+          {loading ? (
             <div className="mt-4 flex items-center gap-2 text-sm text-slate-500" role="status">
               <RefreshCw size={14} className="animate-spin" />
               Waiting for the backend to start...

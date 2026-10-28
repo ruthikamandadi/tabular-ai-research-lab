@@ -23,3 +23,8 @@ data/**/*.parquet
 *.joblib
 *.pkl
 *.pt
+
+*.db
+*.sqlite
+*.sqlite3
+kaggle.json

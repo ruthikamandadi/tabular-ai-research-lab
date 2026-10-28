@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Database, FlaskConical, ArrowRight, CheckCircle, Activity, BookOpen, Play, AlertCircle } from 'lucide-react';
 import {
@@ -118,31 +118,32 @@ export default function Overview() {
     });
   };
 
+  const pollHealth = useCallback(async () => {
+    setBackendOk(null);
+    for (let retry = 0; retry <= 20; retry += 1) {
+      try {
+        await checkHealth();
+        setBackendOk(true);
+        refreshStats().catch(() => {});
+        listSampleDatasets().then(r => setSampleDatasets(r.data)).catch(() => {});
+        return;
+      } catch {
+        if (retry === 20) {
+          setBackendOk(false);
+          return;
+        }
+        await wait(3500);
+      }
+    }
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
-    const pollHealth = async () => {
-      for (let retry = 0; retry <= 20; retry += 1) {
-        try {
-          await checkHealth();
-          if (!cancelled) setBackendOk(true);
-          return;
-        } catch {
-          if (retry === 20) {
-            if (!cancelled) setBackendOk(false);
-            return;
-          }
-          await wait(5000);
-          if (cancelled) return;
-        }
-      }
-    };
     pollHealth();
-    refreshStats().catch(() => {});
-    listSampleDatasets().then(r => setSampleDatasets(r.data)).catch(() => {});
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [pollHealth]);
 
   const runDemoMode = async () => {
     setDemoRunning(true);
@@ -221,9 +222,19 @@ export default function Overview() {
           <p className="page-sub">A local research workspace to prepare tabular data, train models, compare results, explain predictions, and generate reports.</p>
         </div>
         <HelpTooltip text="Overview summarizes project activity and provides a guided demo of the end-to-end churn modeling workflow." />
-        <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium ${backendOk === true ? 'bg-green-100 text-green-700' : backendOk === false ? 'bg-red-100 text-red-700' : 'bg-slate-100 text-slate-500'}`}>
-          <div className={`w-2 h-2 rounded-full ${backendOk === true ? 'bg-green-500' : backendOk === false ? 'bg-red-500' : 'bg-slate-400'} animate-pulse`} />
-          {backendOk === true ? 'Backend Online' : backendOk === false ? 'Backend Offline' : 'Connecting...'}
+        <div className="flex items-center gap-2">
+          <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium ${backendOk === true ? 'bg-green-100 text-green-700' : backendOk === false ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-700'}`}>
+            <div className={`w-2 h-2 rounded-full ${backendOk === true ? 'bg-green-500' : backendOk === false ? 'bg-red-500' : 'bg-amber-400'} animate-pulse`} />
+            {backendOk === true ? 'Backend Online' : backendOk === false ? 'Backend Offline' : 'Waiting for the backend to start...'}
+          </div>
+          {backendOk === false && (
+            <button
+              onClick={() => pollHealth()}
+              className="btn-secondary text-xs px-2.5 py-1"
+            >
+              Retry
+            </button>
+          )}
         </div>
       </div>
 

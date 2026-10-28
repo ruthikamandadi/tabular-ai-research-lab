@@ -589,7 +589,7 @@ def delete_dataset(dataset_id: str, request: Request, db: Session = Depends(get_
 
     db.delete(record)
     db.commit()
-    return {"message": "Dataset deleted."}
+    return {"ok": True, "message": "Dataset deleted."}
 
 
 class DatasetUpdate(BaseModel):
