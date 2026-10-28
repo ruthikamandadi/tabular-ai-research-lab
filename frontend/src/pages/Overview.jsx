@@ -93,7 +93,7 @@ function StepCard({ num, title, desc, done, onClick, btnText }) {
 
 export default function Overview() {
   const navigate = useNavigate();
-  const { selectedDataset, setSelectedDataset } = useApp();
+  const { selectedDataset, setSelectedDataset, setTargetColumn, setTaskType } = useApp();
   const [stats, setStats] = useState({ datasets: 0, experiments: 0, completed: 0, bestScore: null });
   const [backendOk, setBackendOk] = useState(null);
   const [sampleDatasets, setSampleDatasets] = useState([]);
@@ -119,9 +119,29 @@ export default function Overview() {
   };
 
   useEffect(() => {
-    checkHealth().then(() => setBackendOk(true)).catch(() => setBackendOk(false));
+    let cancelled = false;
+    const pollHealth = async () => {
+      for (let retry = 0; retry <= 20; retry += 1) {
+        try {
+          await checkHealth();
+          if (!cancelled) setBackendOk(true);
+          return;
+        } catch {
+          if (retry === 20) {
+            if (!cancelled) setBackendOk(false);
+            return;
+          }
+          await wait(5000);
+          if (cancelled) return;
+        }
+      }
+    };
+    pollHealth();
     refreshStats().catch(() => {});
     listSampleDatasets().then(r => setSampleDatasets(r.data)).catch(() => {});
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const runDemoMode = async () => {

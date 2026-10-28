@@ -100,7 +100,7 @@ npm --prefix frontend install
 npm run dev:all
 ```
 
-The combined script starts FastAPI from `backend` on port 8000 and Vite on port 5173. Use Ctrl+C to stop both processes.
+The first start can take up to a minute while the backend initializes. The combined script waits for the backend health check before starting Vite, then serves FastAPI from `backend` on port 8000 and Vite on port 5173. Use Ctrl+C to stop both processes.
 
 ## URLs
 

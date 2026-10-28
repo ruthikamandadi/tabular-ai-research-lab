@@ -522,3 +522,319 @@ def test_complete_churn_workflow(client):
     assert deleted.status_code == 200, deleted.text
     missing_after_delete = client.get(f"/api/datasets/{dataset_id}/profile")
     assert missing_after_delete.status_code == 404
+
+
+# =====================================================================
+# Authentication & Multi-user Security Tests
+# =====================================================================
+
+def test_unauthenticated_access_is_blocked(unauthenticated_client):
+    endpoints = [
+        ("GET", "/api/datasets"),
+        ("GET", "/api/experiments"),
+        ("GET", "/api/auth/me"),
+        ("POST", "/api/auth/logout"),
+    ]
+    for method, path in endpoints:
+        if method == "GET":
+            response = unauthenticated_client.get(path)
+        else:
+            response = unauthenticated_client.post(path)
+        assert response.status_code == 401, f"{path} should return 401"
+        assert "Authentication required" in response.json()["detail"]
+
+
+def test_registration_validation(unauthenticated_client):
+    # Passwords do not match
+    res = unauthenticated_client.post(
+        "/api/auth/register",
+        json={
+            "name": "Validation User",
+            "email": "val1@example.com",
+            "password": "Password12345!",
+            "confirm_password": "DifferentPassword12345!",
+        },
+    )
+    assert res.status_code == 422
+    assert "Passwords do not match" in res.text
+
+    # Password too short (< 12)
+    res = unauthenticated_client.post(
+        "/api/auth/register",
+        json={
+            "name": "Validation User",
+            "email": "val2@example.com",
+            "password": "Short1!",
+            "confirm_password": "Short1!",
+        },
+    )
+    assert res.status_code == 422
+
+    # Invalid email
+    res = unauthenticated_client.post(
+        "/api/auth/register",
+        json={
+            "name": "Validation User",
+            "email": "not-an-email",
+            "password": "Password12345!",
+            "confirm_password": "Password12345!",
+        },
+    )
+    assert res.status_code == 422
+
+
+def test_auth_lifecycle(unauthenticated_client):
+    email = "lifecycle@example.com"
+    password = "SecureLifecyclePassword123!"
+
+    # 1. Register
+    reg_res = unauthenticated_client.post(
+        "/api/auth/register",
+        json={
+            "name": "Lifecycle Tester",
+            "email": email,
+            "password": password,
+            "confirm_password": password,
+        },
+    )
+    assert reg_res.status_code == 201
+    assert reg_res.json()["user"]["email"] == email
+    assert "tabular_session" in unauthenticated_client.cookies
+
+    # 2. Get current user
+    me_res = unauthenticated_client.get("/api/auth/me")
+    assert me_res.status_code == 200
+    assert me_res.json()["user"]["email"] == email
+
+    # 3. Duplicate registration is rejected
+    dup_res = unauthenticated_client.post(
+        "/api/auth/register",
+        json={
+            "name": "Lifecycle Tester 2",
+            "email": email,
+            "password": password,
+            "confirm_password": password,
+        },
+    )
+    assert dup_res.status_code == 409
+
+    # 4. Logout
+    logout_res = unauthenticated_client.post("/api/auth/logout")
+    assert logout_res.status_code == 200
+
+    # 5. Me after logout returns 401
+    me_after = unauthenticated_client.get("/api/auth/me")
+    assert me_after.status_code == 401
+
+    # 6. Login with wrong password fails
+    bad_login = unauthenticated_client.post(
+        "/api/auth/login",
+        json={"email": email, "password": "WrongPassword123!"},
+    )
+    assert bad_login.status_code == 401
+
+    # 7. Login with correct password succeeds
+    login_res = unauthenticated_client.post(
+        "/api/auth/login",
+        json={"email": email, "password": password},
+    )
+    assert login_res.status_code == 200
+    assert login_res.json()["user"]["email"] == email
+
+    # Session persisted
+    me_again = unauthenticated_client.get("/api/auth/me")
+    assert me_again.status_code == 200
+    assert me_again.json()["user"]["email"] == email
+
+
+def test_multi_user_isolation(client, create_authenticated_client):
+    user_b_client = create_authenticated_client(
+        email="user_isolation_b@example.com",
+        password="SecureIsolationPassword123!",
+        name="User B",
+    )
+
+    # User A uploads a dataset
+    ds_a = upload_dataset(client, "user_a_secret.csv", classification_rows())
+    ds_a_id = ds_a["id"]
+
+    # User A sees it
+    user_a_datasets = client.get("/api/datasets").json()
+    assert any(d["id"] == ds_a_id for d in user_a_datasets)
+
+    # User B lists datasets: must NOT see User A's dataset
+    user_b_datasets = user_b_client.get("/api/datasets").json()
+    assert not any(d["id"] == ds_a_id for d in user_b_datasets)
+
+    # User B cannot preview User A's dataset (404)
+    preview_b = user_b_client.get(f"/api/datasets/{ds_a_id}/preview")
+    assert preview_b.status_code == 404
+
+    # User B cannot profile User A's dataset (404)
+    profile_b = user_b_client.get(f"/api/datasets/{ds_a_id}/profile")
+    assert profile_b.status_code == 404
+
+    # User B cannot delete User A's dataset (404)
+    delete_b = user_b_client.delete(f"/api/datasets/{ds_a_id}")
+    assert delete_b.status_code == 404
+
+    # User B cannot trigger experiment on User A's dataset (404)
+    exp_b = user_b_client.post(
+        "/api/experiments",
+        json={
+            "dataset_id": ds_a_id,
+            "target_column": "target",
+            "task_type": "binary_classification",
+            "model_id": "logistic_regression",
+        },
+    )
+    assert exp_b.status_code == 404
+
+    # User A creates an experiment
+    exp_a_res = client.post(
+        "/api/experiments",
+        json={
+            "dataset_id": ds_a_id,
+            "target_column": "target",
+            "task_type": "binary_classification",
+            "model_id": "logistic_regression",
+            "model_config": {"max_iter": 50},
+            "preprocessing_config": {"test_size": 0.2},
+            "random_seed": 42,
+        },
+    )
+    assert exp_a_res.status_code == 200, exp_a_res.text
+    exp_a_id = exp_a_res.json()["experiment_id"]
+
+    # User B cannot view User A's experiment status or details
+    assert user_b_client.get(f"/api/experiments/{exp_a_id}").status_code == 404
+    assert user_b_client.get(f"/api/experiments/{exp_a_id}/status").status_code == 404
+    assert user_b_client.get(f"/api/reports/{exp_a_id}/json").status_code == 404
+    assert user_b_client.get(f"/api/reports/{exp_a_id}/html").status_code == 404
+    assert user_b_client.get(f"/api/models/{exp_a_id}/schema").status_code == 404
+
+    # User B cannot download or rename User A's dataset
+    assert user_b_client.get(f"/api/datasets/{ds_a_id}/download").status_code == 404
+    assert user_b_client.patch(f"/api/datasets/{ds_a_id}", json={"name": "stolen.csv"}).status_code == 404
+
+    # User A can download and rename their own dataset
+    dl_res = client.get(f"/api/datasets/{ds_a_id}/download")
+    assert dl_res.status_code == 200
+    assert "text/csv" in dl_res.headers.get("content-type", "")
+
+    rename_res = client.patch(f"/api/datasets/{ds_a_id}", json={"name": "user_a_renamed.csv"})
+    assert rename_res.status_code == 200
+    assert rename_res.json()["name"] == "user_a_renamed.csv"
+
+    # Search filter finds renamed dataset
+    search_res = client.get("/api/datasets?q=renamed")
+    assert search_res.status_code == 200
+    assert any(d["id"] == ds_a_id for d in search_res.json())
+
+
+def test_experiment_training_status_serialization_and_db_fallback(client):
+    import torch
+    import numpy as np
+    from app.experiments.runner import _jobs, _jobs_lock
+
+    ds = upload_dataset(client, "status_test.csv", classification_rows(count=60))
+    res = client.post(
+        "/api/experiments",
+        json={
+            "dataset_id": ds["id"],
+            "target_column": "target",
+            "task_type": "binary_classification",
+            "model_id": "logistic_regression",
+            "model_config": {"max_iter": 50},
+            "preprocessing_config": {"test_size": 0.2},
+            "random_seed": 42,
+        },
+    )
+    assert res.status_code == 200
+    exp_id = res.json()["experiment_id"]
+
+    # Wait for the background worker to finish so it doesn't race with our test injection
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        poll = client.get(f"/api/experiments/{exp_id}/status")
+        if poll.status_code == 200 and poll.json()["status"] in ("completed", "failed"):
+            break
+        time.sleep(0.1)
+
+    # 1. Test in-memory job containing torch.device and numpy values
+    with _jobs_lock:
+        _jobs[exp_id] = {
+            "experiment_id": exp_id,
+            "status": "running",
+            "progress": 45,
+            "started_at": time.time() - 2.5,
+            "message": "Epoch 5/10",
+            "device": torch.device("cpu"),
+            "metrics": {"loss": np.float32(0.354)},
+            "training_history": [{"epoch": 1, "train_loss": np.float64(0.5)}],
+            "error": None,
+            "warning": None,
+        }
+
+    status_res = client.get(f"/api/experiments/{exp_id}/status")
+    assert status_res.status_code == 200, status_res.text
+    data = status_res.json()
+    assert data["experiment_id"] == exp_id
+    assert data["status"] == "running"
+    assert data["progress"] == 45
+    assert data["device"] == "cpu"
+    assert isinstance(data["elapsed_seconds"], (int, float))
+    assert data["elapsed_seconds"] >= 2.0
+    assert abs(data["metrics"]["loss"] - 0.354) < 1e-3
+
+    # 2. Test DB fallback when job is evicted from in-memory runner or server restarted
+    with _jobs_lock:
+        _jobs.pop(exp_id, None)
+
+    fallback_res = client.get(f"/api/experiments/{exp_id}/status")
+    assert fallback_res.status_code == 200, fallback_res.text
+    fb_data = fallback_res.json()
+    assert fb_data["experiment_id"] == exp_id
+    assert fb_data["status"] == "completed"
+    assert fb_data["progress"] == 100
+
+    # 3. Test non-existent experiment returns 404
+    missing_res = client.get("/api/experiments/non-existent-id/status")
+    assert missing_res.status_code == 404
+
+
+def test_pytorch_mlp_training_status_poll(client):
+    ds = upload_dataset(client, "pytorch_status.csv", classification_rows(count=80))
+    res = client.post(
+        "/api/experiments",
+        json={
+            "dataset_id": ds["id"],
+            "target_column": "target",
+            "task_type": "binary_classification",
+            "model_id": "pytorch_mlp",
+            "model_config": {"epochs": 3, "batch_size": 16},
+            "preprocessing_config": {"test_size": 0.2},
+            "random_seed": 42,
+        },
+    )
+    assert res.status_code == 200
+    exp_id = res.json()["experiment_id"]
+
+    deadline = time.monotonic() + 30
+    terminal = False
+    while time.monotonic() < deadline:
+        poll_res = client.get(f"/api/experiments/{exp_id}/status")
+        assert poll_res.status_code == 200, f"Poll returned HTTP {poll_res.status_code}: {poll_res.text}"
+        poll_data = poll_res.json()
+        assert poll_data["device"] in ("cpu", "cuda", None)
+        if poll_data["status"] in ("completed", "failed"):
+            terminal = True
+            assert poll_data["status"] == "completed", f"MLP training failed: {poll_data.get('error')}"
+            assert poll_data["progress"] == 100
+            assert poll_data["metrics"] is not None
+            assert "accuracy" in poll_data["metrics"]
+            break
+        time.sleep(0.2)
+
+    assert terminal, "PyTorch MLP training timed out"
+

@@ -2,6 +2,7 @@ import axios from 'axios';
 
 const api = axios.create({
   baseURL: '/api',
+  withCredentials: true,
   timeout: 120000,
 });
 
@@ -24,20 +25,31 @@ api.interceptors.response.use(
         : responseData?.message || err.message;
     const normalizedError = new Error(message || 'An unexpected error occurred.');
     normalizedError.response = err.response ? { ...err.response, data: responseData } : undefined;
+    if (err.response?.status === 401) {
+      window.dispatchEvent(new CustomEvent('auth:unauthorized'));
+    }
     return Promise.reject(normalizedError);
   }
 );
 
 // ---- Datasets ----
-export const uploadDataset = (file) => {
+export const uploadDataset = (file, onProgress) => {
   const form = new FormData();
   form.append('file', file);
   return api.post('/datasets/upload', form, {
     headers: { 'Content-Type': 'multipart/form-data' },
+    onUploadProgress: onProgress ? (progressEvent) => {
+      const percentCompleted = progressEvent.total
+        ? Math.round((progressEvent.loaded * 100) / progressEvent.total)
+        : 0;
+      onProgress(percentCompleted);
+    } : undefined,
   });
 };
 
-export const listDatasets = () => api.get('/datasets');
+export const listDatasets = (params) => api.get('/datasets', { params });
+export const renameDataset = (id, name) => api.patch(`/datasets/${id}`, { name });
+export const getDatasetDownloadUrl = (id) => `/api/datasets/${id}/download`;
 export const getDatasetPreview = (id, rows = 100) => api.get(`/datasets/${id}/preview?rows=${rows}`);
 export const getDatasetProfile = (id) => api.get(`/datasets/${id}/profile`);
 export const deleteDataset = (id) => api.delete(`/datasets/${id}`);

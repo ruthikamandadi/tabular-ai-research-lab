@@ -1,10 +1,11 @@
 import React from 'react';
-import { NavLink, useLocation } from 'react-router-dom';
+import { NavLink, useLocation, useNavigate } from 'react-router-dom';
 import {
   LayoutDashboard, Database, Table2, Settings2, FlaskConical,
   BarChart3, Lightbulb, Zap, FileText, Settings, ChevronRight, Activity,
-  Atom
+  Atom, LogOut, User
 } from 'lucide-react';
+import { useAuth } from '../contexts/AuthContext';
 
 const navItems = [
   { path: '/', label: 'Overview', icon: LayoutDashboard },
@@ -21,6 +22,17 @@ const navItems = [
 
 export default function Sidebar() {
   const location = useLocation();
+  const navigate = useNavigate();
+  const { user, logout } = useAuth();
+
+  const handleLogout = async () => {
+    try {
+      await logout();
+      navigate('/login', { replace: true });
+    } catch {
+      navigate('/login', { replace: true });
+    }
+  };
 
   return (
     <aside className="w-60 min-h-screen bg-[#0f172a] flex flex-col shrink-0">
@@ -55,6 +67,28 @@ export default function Sidebar() {
           );
         })}
       </nav>
+
+      {/* User & Logout */}
+      {user && (
+        <div className="p-3 mx-2 mb-2 bg-slate-800/60 rounded-xl border border-slate-700/50">
+          <div className="flex items-center gap-2 mb-2">
+            <div className="w-7 h-7 rounded-full bg-blue-500/20 text-blue-400 flex items-center justify-center shrink-0">
+              <User size={14} />
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="text-xs font-medium text-slate-200 truncate">{user.name}</div>
+              <div className="text-[10px] text-slate-400 truncate">{user.email}</div>
+            </div>
+          </div>
+          <button
+            onClick={handleLogout}
+            className="w-full flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-lg text-xs font-medium text-slate-400 hover:text-red-400 hover:bg-red-500/10 transition-colors"
+          >
+            <LogOut size={13} />
+            <span>Sign Out</span>
+          </button>
+        </div>
+      )}
 
       {/* Footer */}
       <div className="p-4 border-t border-slate-700/50">

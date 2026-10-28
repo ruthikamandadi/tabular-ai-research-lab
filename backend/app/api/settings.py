@@ -11,10 +11,6 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from app.api import datasets, experiments, kaggle
-from app.explainability import importance
-from app.experiments import runner
-from app.models import model_factory
-from app.preprocessing import pipeline
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 logger = logging.getLogger(__name__)
@@ -112,9 +108,7 @@ def _experiment_api_accepts_time_series() -> bool:
 
 
 def _check_text_images_timeseries():
-    text_ready = callable(getattr(pipeline, "detect_column_types", None)) and callable(
-        getattr(pipeline, "build_preprocessing_pipeline", None)
-    )
+    text_ready = _module_available("app.preprocessing.pipeline")
     image_ready = all(_module_available(package) for package in ("PIL", "torch", "torchvision"))
     time_series_ready = _experiment_api_accepts_time_series()
     fully_available = text_ready and image_ready and time_series_ready
@@ -138,9 +132,8 @@ def _check_text_images_timeseries():
 
 def _check_tuning():
     available = (
-        callable(getattr(runner, "_run_tuning", None))
-        and callable(getattr(runner, "_search_space", None))
-        and _module_available("sklearn.model_selection")
+        _module_available("app.experiments.runner")
+        and _module_available("sklearn")
     )
     note = "Grid and randomized search are available."
     if not _module_available("optuna"):
@@ -155,14 +148,13 @@ def _check_tuning():
 
 
 def _check_shap():
-    function = getattr(importance, "compute_shap_importance", None)
-    available = callable(function) and _module_available("shap")
-    defaults = getattr(function, "__defaults__", ()) or ()
-    sample_limit = defaults[0] if defaults else "unknown"
+    importance_available = _module_available("app.explainability.importance")
+    available = importance_available and _module_available("shap")
+    sample_limit = 200
     note = (
         f"Current SHAP limit: at most {sample_limit} background and explanation rows; "
         "Kernel SHAP evaluates at most 50 rows."
-        if callable(function)
+        if importance_available
         else "SHAP explanation function is unavailable."
     )
     return {
@@ -217,7 +209,7 @@ def _check_deep_models():
         _module_available(package)
         for package in ("torch", "pytorch_tabnet", "rtdl_revisiting_models")
     )
-    registry_ready = callable(getattr(model_factory, "build_model", None))
+    registry_ready = _module_available("app.models.model_factory")
     available = packages_ready and registry_ready
     return {
         "key": "deep_models",

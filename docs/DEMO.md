@@ -5,6 +5,7 @@ The Overview page's **Demo mode** button runs the first two modeling steps autom
 ## Exact order of clicks
 
 1. Start the backend and frontend using the Windows setup steps in the project [README](../README.md).
+   The first start can take up to a minute while the backend initializes; the combined startup command waits for it automatically.
 2. Open <http://localhost:5173> and wait for the Overview page to show **Backend Online**.
 3. Click **Demo mode** once. Leave the page open while the progress bar reports dataset loading, preprocessing, and each model training.
 4. When the success message appears, click **View Experiments**.

@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { useLocation } from 'react-router-dom';
 import { listExperiments, getExperimentResults, deleteExperiment } from '../services/api';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell } from 'recharts';
 import { Activity, Trash2, RefreshCw, Download, CheckCircle, AlertCircle, Clock, ChevronDown, ChevronUp, ExternalLink } from 'lucide-react';
@@ -8,12 +9,18 @@ import HelpTooltip from '../components/HelpTooltip';
 
 const STATUS_COLORS = { completed: 'badge-green', failed: 'badge-red', running: 'badge-blue', pending: 'badge-yellow' };
 
-function ExperimentRow({ exp, onDelete, onDetails }) {
-  const [expanded, setExpanded] = useState(false);
+function ExperimentRow({ exp, onDelete, onDetails, isHighlighted }) {
+  const [expanded, setExpanded] = useState(Boolean(isHighlighted));
+
+  useEffect(() => {
+    if (isHighlighted) {
+      setExpanded(true);
+    }
+  }, [isHighlighted]);
 
   return (
     <>
-      <tr className="hover:bg-slate-50 cursor-pointer" onClick={() => setExpanded(!expanded)}>
+      <tr className={`hover:bg-slate-50 cursor-pointer ${isHighlighted ? 'bg-blue-50/70 border-l-4 border-l-blue-500' : ''}`} onClick={() => setExpanded(!expanded)}>
         <td className="table-td">
           <div className="font-mono text-xs text-slate-400">{exp.id.slice(0, 8)}</div>
           <div className="text-sm font-medium text-slate-800">{exp.model_name}</div>
@@ -118,6 +125,10 @@ function ExperimentRow({ exp, onDelete, onDetails }) {
 }
 
 export default function Experiments() {
+  const location = useLocation();
+  const searchParams = new URLSearchParams(location.search);
+  const targetId = searchParams.get('id') || location.state?.highlightId;
+
   const [experiments, setExperiments] = useState([]);
   const [loading, setLoading] = useState(true);
   const [sortBy, setSortBy] = useState('created_at');
@@ -227,7 +238,12 @@ export default function Experiments() {
               </tr></thead>
               <tbody>
                 {filtered.map(exp => (
-                  <ExperimentRow key={exp.id} exp={exp} onDelete={handleDelete} />
+                  <ExperimentRow
+                    key={exp.id}
+                    exp={exp}
+                    onDelete={handleDelete}
+                    isHighlighted={exp.id === targetId}
+                  />
                 ))}
               </tbody>
             </table>

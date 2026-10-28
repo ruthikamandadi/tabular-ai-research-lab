@@ -13,7 +13,7 @@ export default defineConfig({
         proxyTimeout: 60000,
         configure: (proxy) => {
           proxy.on('error', () => {
-            console.error('Backend not reachable on 127.0.0.1:8000');
+            console.info('Waiting for backend on 127.0.0.1:8000');
           });
         },
       },

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Info, BookOpen, ExternalLink, RefreshCw, CheckCircle, AlertTriangle, AlertCircle, KeyRound } from 'lucide-react';
 import { getCapabilities, saveKaggleCredentials, testKaggleConnection } from '../services/api';
 import HelpTooltip from '../components/HelpTooltip';
@@ -6,7 +6,9 @@ import HelpTooltip from '../components/HelpTooltip';
 export default function SettingsPage() {
   const [capabilities, setCapabilities] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [waitingForBackend, setWaitingForBackend] = useState(false);
   const [error, setError] = useState('');
+  const loadRequestId = useRef(0);
   const [kaggleUsername, setKaggleUsername] = useState('');
   const [kaggleKey, setKaggleKey] = useState('');
   const [kaggleMessage, setKaggleMessage] = useState('');
@@ -15,24 +17,45 @@ export default function SettingsPage() {
   const [kaggleTesting, setKaggleTesting] = useState(false);
 
   const loadCapabilities = useCallback(async (refresh = false) => {
+    const requestId = ++loadRequestId.current;
     setLoading(true);
+    setWaitingForBackend(false);
     setError('');
-    try {
-      const response = await getCapabilities(refresh);
-      setCapabilities(response.data);
-    } catch (requestError) {
-      const fallback = 'Backend not reachable. Start it with: python -m uvicorn app.main:app --reload (in the backend folder)';
-      const detail = requestError.message;
-      setError(detail && !detail.toLowerCase().includes('status code 502') && !detail.toLowerCase().includes('network error')
-        ? `${fallback}. Details: ${detail}`
-        : fallback);
-    } finally {
-      setLoading(false);
+    for (let retry = 0; retry <= 20; retry += 1) {
+      try {
+        const response = await getCapabilities(refresh && retry === 0);
+        if (requestId !== loadRequestId.current) return;
+        setCapabilities(response.data);
+        setWaitingForBackend(false);
+        setLoading(false);
+        return;
+      } catch (requestError) {
+        if (requestId !== loadRequestId.current) return;
+        const status = requestError.response?.status;
+        const retryable = !requestError.response || status === 502 || status === 504 ||
+          /network error/i.test(requestError.message || '');
+        if (!retryable || retry === 20) {
+          const fallback = 'Backend not reachable. Start it with: python -m uvicorn app.main:app --reload (in the backend folder)';
+          const detail = requestError.message;
+          setError(detail && !/status code (502|504)|network error/i.test(detail)
+            ? `${fallback}. Details: ${detail}`
+            : fallback);
+          setLoading(false);
+          setWaitingForBackend(false);
+          return;
+        }
+        setWaitingForBackend(true);
+        await new Promise(resolve => setTimeout(resolve, 3000));
+        if (requestId !== loadRequestId.current) return;
+      }
     }
   }, []);
 
   useEffect(() => {
     loadCapabilities(false);
+    return () => {
+      loadRequestId.current += 1;
+    };
   }, [loadCapabilities]);
 
   const unavailableCapabilities = capabilities.filter(capability => !capability.available);
@@ -159,12 +182,20 @@ export default function SettingsPage() {
               <RefreshCw size={14} className={loading ? 'animate-spin' : ''} /> Refresh
             </button>
           </div>
-          {loading ? (
+          {loading && !waitingForBackend ? (
             <div className="mt-4 space-y-3" aria-label="Loading capabilities">
               {[...Array(4)].map((_, index) => <div key={index} className="skeleton h-12 rounded-lg" />)}
             </div>
+          ) : waitingForBackend ? (
+            <div className="mt-4 flex items-center gap-2 text-sm text-slate-500" role="status">
+              <RefreshCw size={14} className="animate-spin" />
+              Waiting for the backend to start...
+            </div>
           ) : error ? (
-            <div className="error-box mt-4"><AlertCircle size={14} />{error}</div>
+            <div className="mt-4 space-y-3">
+              <div className="error-box"><AlertCircle size={14} />{error}</div>
+              <button onClick={() => loadCapabilities(false)} className="btn-secondary text-xs">Retry</button>
+            </div>
           ) : (
             <>
               <ul className="mt-4 space-y-3 text-sm">
@@ -203,32 +234,32 @@ export default function SettingsPage() {
               </div>
             </>
           )}
-    </div>
+        </div>
 
-    <div className="card">
-      <h2 className="section-title flex items-center gap-2"><KeyRound size={16} className="text-amber-500" />Kaggle Credentials</h2>
-      <p className="mb-4 text-xs text-slate-500">Credentials are stored locally in backend/storage/kaggle.json. The API key is never returned.</p>
-      <div className="space-y-3">
-        <div>
-          <label className="label">Kaggle Username</label>
-          <input className="input-field" value={kaggleUsername} onChange={event => setKaggleUsername(event.target.value)} autoComplete="username" />
+        <div className="card">
+          <h2 className="section-title flex items-center gap-2"><KeyRound size={16} className="text-amber-500" />Kaggle Credentials</h2>
+          <p className="mb-4 text-xs text-slate-500">Credentials are stored locally in backend/storage/kaggle.json. The API key is never returned.</p>
+          <div className="space-y-3">
+            <div>
+              <label className="label">Kaggle Username</label>
+              <input className="input-field" value={kaggleUsername} onChange={event => setKaggleUsername(event.target.value)} autoComplete="username" />
+            </div>
+            <div>
+              <label className="label">Kaggle API Key</label>
+              <input className="input-field" type="password" value={kaggleKey} onChange={event => setKaggleKey(event.target.value)} autoComplete="new-password" />
+            </div>
+            {kaggleError && <div className="error-box"><AlertCircle size={14} />{kaggleError}</div>}
+            {kaggleMessage && <div className="success-box"><CheckCircle size={14} />{kaggleMessage}</div>}
+            <div className="flex flex-wrap gap-2">
+              <button onClick={handleSaveKaggle} disabled={kaggleBusy || kaggleTesting || !kaggleUsername.trim() || !kaggleKey} className="btn-primary">
+                {kaggleBusy ? 'Working…' : 'Save Credentials'}
+              </button>
+              <button onClick={handleTestKaggle} disabled={kaggleBusy || kaggleTesting} className="btn-secondary">
+                {kaggleTesting ? 'Testing…' : 'Test Connection'}
+              </button>
+            </div>
+          </div>
         </div>
-        <div>
-          <label className="label">Kaggle API Key</label>
-          <input className="input-field" type="password" value={kaggleKey} onChange={event => setKaggleKey(event.target.value)} autoComplete="new-password" />
-        </div>
-        {kaggleError && <div className="error-box"><AlertCircle size={14} />{kaggleError}</div>}
-        {kaggleMessage && <div className="success-box"><CheckCircle size={14} />{kaggleMessage}</div>}
-        <div className="flex flex-wrap gap-2">
-          <button onClick={handleSaveKaggle} disabled={kaggleBusy || kaggleTesting || !kaggleUsername.trim() || !kaggleKey} className="btn-primary">
-            {kaggleBusy ? 'Working…' : 'Save Credentials'}
-          </button>
-          <button onClick={handleTestKaggle} disabled={kaggleBusy || kaggleTesting} className="btn-secondary">
-            {kaggleTesting ? 'Testing…' : 'Test Connection'}
-          </button>
-        </div>
-      </div>
-    </div>
       </div>
     </div>
   );

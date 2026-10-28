@@ -72,52 +72,135 @@ function ModelCard({ model, taskType, selected, onSelect, onConfigChange, config
 function TrainingStatus({ job, experimentId }) {
   const navigate = useNavigate();
   if (!job) return null;
-  const { status, progress, message, metrics, device, training_history: history = [] } = job;
+  const {
+    status = 'pending',
+    progress = 0,
+    message,
+    metrics,
+    device,
+    training_history: history = [],
+    model_name,
+    error: jobError,
+    elapsed_seconds,
+    warning,
+  } = job;
   const latestEpoch = history.length ? history[history.length - 1] : null;
 
   return (
-    <div className={`card mt-4 ${status === 'completed' ? 'border-green-200 bg-green-50/20' : status === 'failed' ? 'border-red-200 bg-red-50/20' : 'border-blue-200 bg-blue-50/20'}`}>
-      <div className="flex items-center gap-3 mb-3">
-        {status === 'completed' ? <CheckCircle size={18} className="text-green-500" /> :
-          status === 'failed' ? <AlertCircle size={18} className="text-red-500" /> :
-          <div className="w-4 h-4 border-2 border-blue-400 border-t-transparent rounded-full animate-spin" />}
-        <span className="font-semibold text-sm capitalize">{status}</span>
-        <span className="text-xs text-slate-500">{message}</span>
-        {device && <span className="badge badge-gray ml-auto">{String(device).toUpperCase()}</span>}
+    <div
+      className={`card mt-4 ${
+        status === 'completed'
+          ? 'border-green-200 bg-green-50/20'
+          : status === 'failed'
+          ? 'border-red-200 bg-red-50/20'
+          : status === 'cancelled'
+          ? 'border-amber-200 bg-amber-50/20'
+          : 'border-blue-200 bg-blue-50/20'
+      }`}
+    >
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-3">
+          {status === 'completed' ? (
+            <CheckCircle size={18} className="text-green-500 shrink-0" />
+          ) : status === 'failed' ? (
+            <AlertCircle size={18} className="text-red-500 shrink-0" />
+          ) : (
+            <div className="w-4 h-4 border-2 border-blue-400 border-t-transparent rounded-full animate-spin shrink-0" />
+          )}
+          <div>
+            <div className="flex items-center gap-2">
+              <span className="font-semibold text-sm text-slate-800">
+                {model_name || `Experiment (${String(experimentId).slice(0, 8)})`}
+              </span>
+              <span
+                className={`badge ${
+                  status === 'completed'
+                    ? 'badge-green'
+                    : status === 'failed'
+                    ? 'badge-red'
+                    : status === 'cancelled'
+                    ? 'badge-yellow'
+                    : 'badge-blue'
+                } text-[11px] capitalize`}
+              >
+                {status}
+              </span>
+            </div>
+            {message && <div className="text-xs text-slate-500 mt-0.5">{message}</div>}
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          {elapsed_seconds != null && (
+            <span className="text-xs text-slate-400 font-mono">
+              {Number(elapsed_seconds).toFixed(1)}s elapsed
+            </span>
+          )}
+          {device && <span className="badge badge-gray">{String(device).toUpperCase()}</span>}
+        </div>
       </div>
-      {status === 'running' && (
+
+      {(status === 'running' || status === 'pending') && (
         <>
           <div className="progress-bar mb-2">
-            <div className="progress-fill" style={{ width: `${progress}%` }} />
+            <div className="progress-fill" style={{ width: `${Math.min(100, Math.max(0, progress))}%` }} />
           </div>
           <div className="flex justify-between text-xs text-slate-500 mb-2">
-            <span>{latestEpoch ? `Epoch ${latestEpoch.epoch}: train loss ${Number(latestEpoch.train_loss).toFixed(4)}${latestEpoch.val_loss != null ? ` · validation loss ${Number(latestEpoch.val_loss).toFixed(4)}` : latestEpoch.val_score != null ? ` · validation score ${Number(latestEpoch.val_score).toFixed(4)}` : ''}` : message}</span>
-            {job.elapsed_seconds != null && <span>{Number(job.elapsed_seconds).toFixed(1)}s elapsed</span>}
+            <span>
+              {latestEpoch
+                ? `Epoch ${latestEpoch.epoch}: train loss ${Number(latestEpoch.train_loss).toFixed(4)}${
+                    latestEpoch.val_loss != null
+                      ? ` · validation loss ${Number(latestEpoch.val_loss).toFixed(4)}`
+                      : latestEpoch.val_score != null
+                      ? ` · validation score ${Number(latestEpoch.val_score).toFixed(4)}`
+                      : ''
+                  }`
+                : status === 'pending'
+                ? 'Queued, waiting for execution...'
+                : message || `${Math.round(progress)}% completed`}
+            </span>
+            <span>{Math.round(progress)}%</span>
           </div>
         </>
       )}
-      {job.warning && (
+
+      {warning && (
         <div className="mt-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
-          {job.warning}
+          {warning}
         </div>
       )}
+
       {status === 'completed' && metrics && (
-        <div className="grid grid-cols-3 gap-2 mt-3">
-          {Object.entries(metrics).filter(([k]) => !['confusion_matrix','class_names'].includes(k)).map(([k, v]) => (
-            <div key={k} className="text-center p-2 bg-white rounded-lg border border-green-100">
-              <div className="text-xs text-slate-500">{k.toUpperCase()}</div>
-              <div className="text-sm font-bold text-slate-800">{typeof v === 'number' ? v.toFixed(4) : v}</div>
-            </div>
-          ))}
+        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2 mt-3">
+          {Object.entries(metrics)
+            .filter(([k]) => !['confusion_matrix', 'class_names'].includes(k))
+            .map(([k, v]) => (
+              <div key={k} className="text-center p-2 bg-white rounded-lg border border-green-100 shadow-sm">
+                <div className="text-xs text-slate-500 font-medium">{k.toUpperCase()}</div>
+                <div className="text-sm font-bold text-slate-800">
+                  {typeof v === 'number' ? v.toFixed(4) : String(v)}
+                </div>
+              </div>
+            ))}
         </div>
       )}
+
       {status === 'completed' && (
-        <button onClick={() => navigate('/experiments')} className="btn-primary mt-3">
+        <button
+          onClick={() => navigate(`/experiments?id=${experimentId}`, { state: { highlightId: experimentId } })}
+          className="btn-primary mt-3 text-xs"
+        >
           <Zap size={14} /> View in Experiments
         </button>
       )}
-      {status === 'failed' && job.error && (
-        <div className="error-box mt-2"><AlertCircle size={13} /><code className="text-[10px]">{job.message}</code></div>
+
+      {status === 'failed' && (
+        <div className="error-box mt-3 text-xs">
+          <AlertCircle size={14} className="shrink-0" />
+          <div>
+            <div className="font-semibold">Training Failed</div>
+            <div className="text-slate-700 mt-0.5">{jobError || message || 'An unexpected error occurred during training.'}</div>
+          </div>
+        </div>
       )}
     </div>
   );
@@ -133,10 +216,24 @@ export default function ModelLab() {
   const [error, setError] = useState(null);
   const [modelsLoading, setModelsLoading] = useState(true);
   const pollingRef = useRef({});
+  const inFlightRef = useRef(new Set());
+  const retryCountsRef = useRef({});
+  const unmountedRef = useRef(false);
   const navigate = useNavigate();
 
   useEffect(() => {
-    getAvailableModels().then(r => setModels(r.data)).catch(e => setError(`Could not load available models: ${e.message}`)).finally(() => setModelsLoading(false));
+    unmountedRef.current = false;
+    getAvailableModels()
+      .then(r => setModels(r.data))
+      .catch(e => setError(`Could not load available models: ${e.message}`))
+      .finally(() => setModelsLoading(false));
+
+    return () => {
+      unmountedRef.current = true;
+      Object.values(pollingRef.current).forEach(clearInterval);
+      pollingRef.current = {};
+      inFlightRef.current.clear();
+    };
   }, []);
 
   const toggleModel = (id) => {
@@ -151,51 +248,114 @@ export default function ModelLab() {
   };
 
   const pollStatus = (expId) => {
-    const interval = setInterval(async () => {
+    if (pollingRef.current[expId]) {
+      clearInterval(pollingRef.current[expId]);
+      delete pollingRef.current[expId];
+    }
+
+    const checkStatus = async () => {
+      if (unmountedRef.current) return;
+      if (inFlightRef.current.has(expId)) return; // Prevent overlapping requests
+
+      inFlightRef.current.add(expId);
       try {
         const r = await getExperimentStatus(expId);
+        if (unmountedRef.current) return;
+
         const job = r.data;
         setJobs(prev => ({ ...prev, [expId]: job }));
-        if (job.status === 'completed' || job.status === 'failed') {
-          clearInterval(interval);
-          delete pollingRef.current[expId];
+
+        // Clear consecutive retry count on success
+        retryCountsRef.current[expId] = 0;
+
+        // Clear status refresh error if polling succeeded
+        setError(prev => (prev && prev.includes('Could not refresh training status') ? null : prev));
+
+        if (['completed', 'failed', 'cancelled'].includes(job.status)) {
+          if (pollingRef.current[expId]) {
+            clearInterval(pollingRef.current[expId]);
+            delete pollingRef.current[expId];
+          }
         }
-      } catch (error) {
-        clearInterval(interval);
-        delete pollingRef.current[expId];
-        setError(`Could not refresh training status: ${error.message}`);
+      } catch (err) {
+        if (unmountedRef.current) return;
+
+        const retries = (retryCountsRef.current[expId] || 0) + 1;
+        retryCountsRef.current[expId] = retries;
+
+        const maxRetries = 5;
+        if (retries >= maxRetries) {
+          if (pollingRef.current[expId]) {
+            clearInterval(pollingRef.current[expId]);
+            delete pollingRef.current[expId];
+          }
+          const detail = err.response?.data?.detail || err.message;
+          setError(`Could not refresh training status: ${detail}`);
+        }
+      } finally {
+        inFlightRef.current.delete(expId);
       }
-    }, 1500);
-    pollingRef.current[expId] = interval;
+    };
+
+    // Immediate first check, then recurring interval
+    checkStatus();
+    pollingRef.current[expId] = setInterval(checkStatus, 1500);
   };
 
   const handleTrain = async () => {
+    if (launching) return;
     if (!selectedDataset) { setError('No dataset selected. Go to Datasets first.'); return; }
     if (!targetColumn) { setError('No target column set. Go to Preprocessing first.'); return; }
     if (!taskType) { setError('No task type confirmed. Go to Preprocessing first.'); return; }
     if (selectedModels.length === 0) { setError('Select at least one model.'); return; }
+
+    // Check if any selected model is already training or queued
+    const activeJobs = Object.values(jobs).filter(j => ['running', 'pending'].includes(j.status));
+    const activeModelIds = activeJobs.map(j => j.model_id);
+    const modelsToLaunch = selectedModels.filter(mId => !activeModelIds.includes(mId));
+
+    if (modelsToLaunch.length === 0) {
+      setError('All selected models are already actively training or queued.');
+      return;
+    }
+
     setError(null);
     setLaunching(true);
 
-    for (const modelId of selectedModels) {
-      try {
-        const r = await createExperiment({
-          dataset_id: selectedDataset.id,
-          target_column: targetColumn,
-          task_type: taskType,
-          model_id: modelId,
-          model_config: modelConfigs[modelId] || {},
-          preprocessing_config: preprocessingConfig,
-          random_seed: preprocessingConfig.random_seed || 42,
-        });
-        const expId = r.data.experiment_id;
-        setJobs(prev => ({ ...prev, [expId]: { status: 'pending', progress: 0, message: 'Queued…' } }));
-        pollStatus(expId);
-      } catch (e) {
-        setError(`Failed to start ${modelId}: ${e.message}`);
+    try {
+      for (const modelId of modelsToLaunch) {
+        try {
+          const r = await createExperiment({
+            dataset_id: selectedDataset.id,
+            target_column: targetColumn,
+            task_type: taskType,
+            model_id: modelId,
+            model_config: modelConfigs[modelId] || {},
+            preprocessing_config: preprocessingConfig,
+            random_seed: preprocessingConfig.random_seed || 42,
+          });
+          const expId = r.data.experiment_id;
+          const modelObj = models.find(m => m.id === modelId);
+          setJobs(prev => ({
+            ...prev,
+            [expId]: {
+              experiment_id: expId,
+              model_id: modelId,
+              model_name: modelObj?.name || modelId,
+              status: 'pending',
+              progress: 0,
+              message: 'Queued…',
+            },
+          }));
+          pollStatus(expId);
+        } catch (e) {
+          const detail = e.response?.data?.detail || e.message;
+          setError(`Failed to start ${modelId}: ${detail}`);
+        }
       }
+    } finally {
+      setLaunching(false);
     }
-    setLaunching(false);
   };
 
   const ready = selectedDataset && targetColumn && taskType;

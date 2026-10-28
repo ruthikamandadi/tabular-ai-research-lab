@@ -27,6 +27,7 @@ class DatasetRecord(Base):
     __tablename__ = "datasets"
 
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    owner_id = Column(String, nullable=True, index=True)
     name = Column(String, nullable=False)
     filename = Column(String, nullable=False)
     filepath = Column(String, nullable=False)
@@ -45,6 +46,7 @@ class ExperimentRecord(Base):
     __tablename__ = "experiments"
 
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    owner_id = Column(String, nullable=True, index=True)
     dataset_id = Column(String, nullable=False)
     dataset_name = Column(String)
     target_column = Column(String, nullable=False)
@@ -78,14 +80,40 @@ class ExperimentRecord(Base):
     forecast_data = Column(JSON)
 
 
+class UserRecord(Base):
+    __tablename__ = "users"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    name = Column(String, nullable=False)
+    email = Column(String, nullable=False, unique=True, index=True)
+    password_hash = Column(String, nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(UTC), nullable=False)
+
+
+class AuthSessionRecord(Base):
+    __tablename__ = "auth_sessions"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String, nullable=False, index=True)
+    token_hash = Column(String, nullable=False, unique=True, index=True)
+    expires_at = Column(DateTime, nullable=False, index=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(UTC), nullable=False)
+
+
 def init_db():
     Base.metadata.create_all(bind=engine)
     with engine.begin() as connection:
         dataset_columns = {row[1] for row in connection.exec_driver_sql("PRAGMA table_info(datasets)")}
-        if "is_synthetic" not in dataset_columns:
-            connection.exec_driver_sql("ALTER TABLE datasets ADD COLUMN is_synthetic BOOLEAN NOT NULL DEFAULT 0")
+        dataset_migrations = {
+            "is_synthetic": "BOOLEAN NOT NULL DEFAULT 0",
+            "owner_id": "VARCHAR",
+        }
+        for name, sql_type in dataset_migrations.items():
+            if name not in dataset_columns:
+                connection.exec_driver_sql(f"ALTER TABLE datasets ADD COLUMN {name} {sql_type}")
         columns = {row[1] for row in connection.exec_driver_sql("PRAGMA table_info(experiments)")}
         for name, sql_type in (
+            ("owner_id", "VARCHAR"),
             ("best_params", "JSON"),
             ("best_cv_score", "FLOAT"),
             ("tuning_trials", "JSON"),

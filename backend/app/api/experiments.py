@@ -7,22 +7,48 @@ import joblib
 import numpy as np
 import pandas as pd
 import time
+import math
+import logging
 from pathlib import Path
 from typing import Optional, List
 from datetime import datetime
 
-from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
+from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db, ExperimentRecord, DatasetRecord
 from app.core.config import ARTIFACTS_DIR, UPLOADS_DIR
-from app.models.model_factory import get_available_models
+from app.core.auth import request_user_id, require_authenticated_user
 from app.core.datetime_utils import parse_datetime
-from app.experiments.runner import run_training_job, get_job
-from app.explainability.importance import compute_model_importances, compute_local_explanation
 
-router = APIRouter(prefix="/api/experiments", tags=["experiments"])
+logger = logging.getLogger(__name__)
+
+router = APIRouter(
+    prefix="/api/experiments",
+    tags=["experiments"],
+    dependencies=[Depends(require_authenticated_user)],
+)
+
+
+def _sanitize_for_json(value):
+    if value is None:
+        return None
+    if isinstance(value, float):
+        if math.isnan(value) or math.isinf(value):
+            return None
+        return value
+    if isinstance(value, dict):
+        return {str(k): _sanitize_for_json(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_sanitize_for_json(x) for x in value]
+    if isinstance(value, np.generic):
+        return _sanitize_for_json(value.item())
+    if isinstance(value, np.ndarray):
+        return [_sanitize_for_json(x) for x in value.tolist()]
+    if hasattr(value, "__class__") and "device" in value.__class__.__name__.lower():
+        return str(value)
+    return value
 
 
 class ExperimentCreate(BaseModel):
@@ -37,13 +63,19 @@ class ExperimentCreate(BaseModel):
 
 @router.get("/models/available")
 def get_models():
+    from app.models.model_factory import get_available_models
+
     return get_available_models()
 
 
 @router.post("")
-def create_experiment(body: ExperimentCreate, db: Session = Depends(get_db)):
+def create_experiment(body: ExperimentCreate, request: Request, db: Session = Depends(get_db)):
     # Validate dataset
-    dataset = db.query(DatasetRecord).filter(DatasetRecord.id == body.dataset_id).first()
+    owner_id = request_user_id(request)
+    dataset = db.query(DatasetRecord).filter(
+        DatasetRecord.id == body.dataset_id,
+        DatasetRecord.owner_id == owner_id,
+    ).first()
     if not dataset:
         raise HTTPException(404, "Dataset not found.")
 
@@ -72,6 +104,8 @@ def create_experiment(body: ExperimentCreate, db: Session = Depends(get_db)):
             raise HTTPException(400, f"Date column '{date_column}' must be sorted in ascending chronological order.")
 
     # Validate model for task
+    from app.models.model_factory import get_available_models
+
     available = get_available_models()
     model_info = next((m for m in available if m["id"] == body.model_id), None)
     if not model_info:
@@ -83,6 +117,7 @@ def create_experiment(body: ExperimentCreate, db: Session = Depends(get_db)):
 
     exp = ExperimentRecord(
         id=experiment_id,
+        owner_id=owner_id,
         dataset_id=body.dataset_id,
         dataset_name=dataset.name,
         target_column=body.target_column,
@@ -109,52 +144,129 @@ def create_experiment(body: ExperimentCreate, db: Session = Depends(get_db)):
         "random_seed": body.random_seed,
         "experiment_id": experiment_id,
     }
+    from app.experiments.runner import run_training_job
+
     run_training_job(experiment_id, job_config)
 
     return {"experiment_id": experiment_id, "status": "pending", "message": "Training started."}
 
 
 @router.get("")
-def list_experiments(db: Session = Depends(get_db)):
-    records = db.query(ExperimentRecord).order_by(ExperimentRecord.created_at.desc()).all()
+def list_experiments(request: Request, db: Session = Depends(get_db)):
+    records = db.query(ExperimentRecord).filter(
+        ExperimentRecord.owner_id == request_user_id(request),
+    ).order_by(ExperimentRecord.created_at.desc()).all()
     return [_serialize_experiment(r) for r in records]
 
 
 @router.get("/{experiment_id}")
-def get_experiment(experiment_id: str, db: Session = Depends(get_db)):
-    record = db.query(ExperimentRecord).filter(ExperimentRecord.id == experiment_id).first()
+def get_experiment(experiment_id: str, request: Request, db: Session = Depends(get_db)):
+    record = db.query(ExperimentRecord).filter(
+        ExperimentRecord.id == experiment_id,
+        ExperimentRecord.owner_id == request_user_id(request),
+    ).first()
     if not record:
         raise HTTPException(404, "Experiment not found.")
     return _serialize_experiment(record)
 
 
 @router.get("/{experiment_id}/status")
-def get_experiment_status(experiment_id: str, db: Session = Depends(get_db)):
-    job = get_job(experiment_id)
-    if job:
-        return {
-            "experiment_id": experiment_id,
-            "status": job.get("status"),
-            "progress": job.get("progress", 0),
-            "elapsed_seconds": round(max(0, time.time() - job.get("started_at", time.time())), 1),
-            "message": job.get("message", ""),
-            "training_history": job.get("training_history", []),
-            "device": job.get("device"),
-            "warning": job.get("warning"),
-            "best_params": job.get("best_params"),
-            "best_cv_score": job.get("best_cv_score"),
-            "tuning_trials": job.get("tuning_trials"),
-        }
-    # Fall back to DB
-    record = db.query(ExperimentRecord).filter(ExperimentRecord.id == experiment_id).first()
+def get_experiment_status(experiment_id: str, request: Request, db: Session = Depends(get_db)):
+    owner_id = request_user_id(request)
+    record = db.query(ExperimentRecord).filter(
+        ExperimentRecord.id == experiment_id,
+        ExperimentRecord.owner_id == owner_id,
+    ).first()
     if not record:
         raise HTTPException(404, "Experiment not found.")
-    return {"experiment_id": experiment_id, "status": record.status, "progress": 100 if record.status == "completed" else 0, "message": ""}
+
+    from app.experiments.runner import get_job
+
+    try:
+        job = get_job(experiment_id)
+        if job:
+            status = job.get("status") or record.status or "pending"
+            progress = job.get("progress")
+            if progress is None:
+                progress = 100 if status == "completed" else 0
+
+            started_at = job.get("started_at")
+            if isinstance(started_at, (int, float)):
+                elapsed_seconds = round(max(0.0, time.time() - started_at), 1)
+            elif record.train_duration_s is not None:
+                elapsed_seconds = round(record.train_duration_s, 1)
+            else:
+                elapsed_seconds = None
+
+            message = job.get("message")
+            if not message:
+                if status == "completed":
+                    message = "Training complete!"
+                elif status == "failed":
+                    message = record.error_message or "Training failed."
+                else:
+                    message = "Queued..."
+
+            error = job.get("error") or (record.error_message if status == "failed" else None)
+            metrics = job.get("metrics") or record.metrics
+            device_val = job.get("device")
+            if device_val is None:
+                device_val = (record.model_config or {}).get("device")
+            device_str = str(device_val) if device_val is not None else None
+
+            response_data = {
+                "experiment_id": experiment_id,
+                "model_name": record.model_name,
+                "status": status,
+                "progress": progress,
+                "elapsed_seconds": elapsed_seconds,
+                "message": message,
+                "metrics": metrics,
+                "error": error,
+                "training_history": job.get("training_history") or record.training_history or [],
+                "device": device_str,
+                "warning": job.get("warning"),
+                "best_params": job.get("best_params") or record.best_params,
+                "best_cv_score": job.get("best_cv_score") if job.get("best_cv_score") is not None else record.best_cv_score,
+                "tuning_trials": job.get("tuning_trials") or record.tuning_trials,
+            }
+            return _sanitize_for_json(response_data)
+
+        # Fall back to DB
+        status = record.status or "pending"
+        progress = 100 if status == "completed" else 0
+        elapsed_seconds = round(record.train_duration_s, 1) if record.train_duration_s is not None else None
+        message = record.error_message if status == "failed" else ("Training complete!" if status == "completed" else "Queued...")
+        device_val = (record.model_config or {}).get("device")
+
+        response_data = {
+            "experiment_id": experiment_id,
+            "model_name": record.model_name,
+            "status": status,
+            "progress": progress,
+            "elapsed_seconds": elapsed_seconds,
+            "message": message,
+            "metrics": record.metrics,
+            "error": record.error_message if status == "failed" else None,
+            "training_history": record.training_history or [],
+            "device": str(device_val) if device_val is not None else None,
+            "warning": None,
+            "best_params": record.best_params,
+            "best_cv_score": record.best_cv_score,
+            "tuning_trials": record.tuning_trials,
+        }
+        return _sanitize_for_json(response_data)
+    except Exception as exc:
+        logger.exception("Error preparing experiment status for %s", experiment_id)
+        raise HTTPException(500, f"Could not retrieve status for experiment {experiment_id}: {exc}") from exc
 
 
 @router.get("/{experiment_id}/results")
-def get_experiment_results(experiment_id: str, db: Session = Depends(get_db)):
-    record = db.query(ExperimentRecord).filter(ExperimentRecord.id == experiment_id).first()
+def get_experiment_results(experiment_id: str, request: Request, db: Session = Depends(get_db)):
+    record = db.query(ExperimentRecord).filter(
+        ExperimentRecord.id == experiment_id,
+        ExperimentRecord.owner_id == request_user_id(request),
+    ).first()
     if not record:
         raise HTTPException(404, "Experiment not found.")
     if record.status != "completed":
@@ -171,10 +283,16 @@ def get_experiment_results(experiment_id: str, db: Session = Depends(get_db)):
 
 
 @router.get("/{experiment_id}/explanations")
-def get_explanations(experiment_id: str, db: Session = Depends(get_db)):
-    record = db.query(ExperimentRecord).filter(ExperimentRecord.id == experiment_id).first()
-    if not record or record.status != "completed":
-        raise HTTPException(400, "Experiment not completed.")
+def get_explanations(experiment_id: str, request: Request, db: Session = Depends(get_db)):
+    owner_id = request_user_id(request)
+    record = db.query(ExperimentRecord).filter(
+        ExperimentRecord.id == experiment_id,
+        ExperimentRecord.owner_id == owner_id,
+    ).first()
+    if not record:
+        raise HTTPException(404, "Experiment not found.")
+    if record.status != "completed":
+        raise HTTPException(400, "Experiment has not completed.")
 
     artifact_dir = Path(record.artifact_path)
     meta_path = artifact_dir / "meta.json"
@@ -196,7 +314,10 @@ def get_explanations(experiment_id: str, db: Session = Depends(get_db)):
         raise HTTPException(500, f"Failed to load model artifacts: {e}")
 
     # Load dataset
-    dataset = db.query(DatasetRecord).filter(DatasetRecord.id == record.dataset_id).first()
+    dataset = db.query(DatasetRecord).filter(
+        DatasetRecord.id == record.dataset_id,
+        DatasetRecord.owner_id == owner_id,
+    ).first()
     if not dataset:
         raise HTTPException(404, "Original dataset not found.")
 
@@ -237,6 +358,8 @@ def get_explanations(experiment_id: str, db: Session = Depends(get_db)):
             "fallback_used": False,
         }
     else:
+        from app.explainability.importance import compute_model_importances
+
         importance = compute_model_importances(
             model, X_transformed, X_transformed, y, feature_names, record.task_type
         )
@@ -244,8 +367,11 @@ def get_explanations(experiment_id: str, db: Session = Depends(get_db)):
 
 
 @router.delete("/{experiment_id}")
-def delete_experiment(experiment_id: str, db: Session = Depends(get_db)):
-    record = db.query(ExperimentRecord).filter(ExperimentRecord.id == experiment_id).first()
+def delete_experiment(experiment_id: str, request: Request, db: Session = Depends(get_db)):
+    record = db.query(ExperimentRecord).filter(
+        ExperimentRecord.id == experiment_id,
+        ExperimentRecord.owner_id == request_user_id(request),
+    ).first()
     if not record:
         raise HTTPException(404, "Experiment not found.")
     db.delete(record)

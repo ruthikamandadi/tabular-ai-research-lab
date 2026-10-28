@@ -7,13 +7,18 @@ import csv
 from pathlib import Path
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Request
 from fastapi.responses import StreamingResponse, HTMLResponse
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db, ExperimentRecord
+from app.core.auth import request_user_id, require_authenticated_user
 
-router = APIRouter(prefix="/api/reports", tags=["reports"])
+router = APIRouter(
+    prefix="/api/reports",
+    tags=["reports"],
+    dependencies=[Depends(require_authenticated_user)],
+)
 
 
 def _build_html_report(exp: ExperimentRecord) -> str:
@@ -109,10 +114,15 @@ def _build_html_report(exp: ExperimentRecord) -> str:
 
 
 @router.get("/{experiment_id}/html")
-def get_html_report(experiment_id: str, db: Session = Depends(get_db)):
-    record = db.query(ExperimentRecord).filter(ExperimentRecord.id == experiment_id).first()
-    if not record or record.status != "completed":
-        raise HTTPException(400, "Experiment not completed or not found.")
+def get_html_report(experiment_id: str, request: Request, db: Session = Depends(get_db)):
+    record = db.query(ExperimentRecord).filter(
+        ExperimentRecord.id == experiment_id,
+        ExperimentRecord.owner_id == request_user_id(request),
+    ).first()
+    if not record:
+        raise HTTPException(404, "Experiment not found.")
+    if record.status != "completed":
+        raise HTTPException(400, "Experiment has not completed.")
 
     html = _build_html_report(record)
     return HTMLResponse(content=html, headers={
@@ -121,9 +131,12 @@ def get_html_report(experiment_id: str, db: Session = Depends(get_db)):
 
 
 @router.get("/{experiment_id}/json")
-def get_json_report(experiment_id: str, db: Session = Depends(get_db)):
+def get_json_report(experiment_id: str, request: Request, db: Session = Depends(get_db)):
     from app.api.experiments import _serialize_experiment
-    record = db.query(ExperimentRecord).filter(ExperimentRecord.id == experiment_id).first()
+    record = db.query(ExperimentRecord).filter(
+        ExperimentRecord.id == experiment_id,
+        ExperimentRecord.owner_id == request_user_id(request),
+    ).first()
     if not record:
         raise HTTPException(404, "Experiment not found.")
     data = _serialize_experiment(record)
@@ -135,12 +148,15 @@ def get_json_report(experiment_id: str, db: Session = Depends(get_db)):
 
 
 @router.get("/compare/csv")
-def compare_experiments_csv(ids: str, db: Session = Depends(get_db)):
+def compare_experiments_csv(ids: str, request: Request, db: Session = Depends(get_db)):
     """Export a comparison CSV for a comma-separated list of experiment IDs."""
     exp_ids = [i.strip() for i in ids.split(",") if i.strip()]
-    records = db.query(ExperimentRecord).filter(ExperimentRecord.id.in_(exp_ids)).all()
+    records = db.query(ExperimentRecord).filter(
+        ExperimentRecord.id.in_(exp_ids),
+        ExperimentRecord.owner_id == request_user_id(request),
+    ).all()
 
-    if not records:
+    if not records or len(records) != len(set(exp_ids)):
         raise HTTPException(404, "No experiments found.")
 
     output = io.StringIO()

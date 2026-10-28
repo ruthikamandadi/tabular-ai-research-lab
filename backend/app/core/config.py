@@ -17,6 +17,7 @@ DB_PATH = DATA_DIR / "tabular_lab.db"
 STORAGE_DIR = Path(__file__).resolve().parents[2] / "storage"
 KAGGLE_CREDENTIALS_PATH = STORAGE_DIR / "kaggle.json"
 BACKEND_PORT = int(os.getenv("BACKEND_PORT", "8000"))
+COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() in {"1", "true", "yes"}
 
 # Ensure directories exist
 for d in [UPLOADS_DIR, SAMPLE_DIR, ARTIFACTS_DIR, REPORTS_DIR, STORAGE_DIR]:

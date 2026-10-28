@@ -4,7 +4,13 @@ Dataset upload, management, profiling, and preview endpoints.
 import uuid
 import os
 import io
-import chardet
+try:
+    import charset_normalizer as chardet
+except ImportError:
+    try:
+        import chardet
+    except ImportError:
+        chardet = None
 import importlib.util
 import logging
 import threading
@@ -15,16 +21,21 @@ from typing import List, Optional, Dict, Any
 from datetime import datetime
 
 import pandas as pd
-from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Query
+from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Query, Request
 from fastapi.responses import JSONResponse, FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db, SessionLocal, DatasetRecord
 from app.core.config import UPLOADS_DIR, SAMPLE_DIR, MAX_UPLOAD_SIZE_MB, MAX_ROWS_PREVIEW, MAX_SYNTHETIC_ROWS
+from app.core.auth import request_user_id, require_authenticated_user
 from app.services.profiler import profile_dataset, suggest_task_type, get_target_distribution
 
-router = APIRouter(prefix="/api/datasets", tags=["datasets"])
+router = APIRouter(
+    prefix="/api/datasets",
+    tags=["datasets"],
+    dependencies=[Depends(require_authenticated_user)],
+)
 logger = logging.getLogger(__name__)
 _SYNTHESIS_JOBS: Dict[str, Dict[str, Any]] = {}
 _SYNTHESIS_LOCK = threading.Lock()
@@ -46,8 +57,14 @@ def _load_csv_safe(filepath: str) -> pd.DataFrame:
     """Load CSV with encoding detection."""
     with open(filepath, "rb") as f:
         raw = f.read(100_000)
-    detected = chardet.detect(raw)
-    encoding = detected.get("encoding", "utf-8") or "utf-8"
+    encoding = "utf-8"
+    if chardet is not None:
+        try:
+            detected = chardet.detect(raw)
+            if isinstance(detected, dict):
+                encoding = detected.get("encoding") or "utf-8"
+        except Exception:
+            encoding = "utf-8"
 
     for enc in [encoding, "utf-8", "latin-1", "cp1252"]:
         try:
@@ -59,7 +76,7 @@ def _load_csv_safe(filepath: str) -> pd.DataFrame:
 
 
 @router.post("/upload")
-async def upload_dataset(file: UploadFile = File(...), db: Session = Depends(get_db)):
+async def upload_dataset(request: Request, file: UploadFile = File(...), db: Session = Depends(get_db)):
     # Validate extension
     if not file.filename.lower().endswith(".csv"):
         raise HTTPException(400, "Only CSV files are supported.")
@@ -88,6 +105,7 @@ async def upload_dataset(file: UploadFile = File(...), db: Session = Depends(get
 
     record = DatasetRecord(
         id=dataset_id,
+        owner_id=request_user_id(request),
         name=Path(file.filename).stem,
         filename=file.filename,
         filepath=str(dest_path),
@@ -116,8 +134,25 @@ async def upload_dataset(file: UploadFile = File(...), db: Session = Depends(get
 
 
 @router.get("")
-def list_datasets(db: Session = Depends(get_db)):
-    records = db.query(DatasetRecord).order_by(DatasetRecord.created_at.desc()).all()
+def list_datasets(
+    request: Request,
+    q: Optional[str] = Query(None),
+    limit: Optional[int] = Query(None, ge=1, le=500),
+    offset: Optional[int] = Query(None, ge=0),
+    db: Session = Depends(get_db),
+):
+    query = db.query(DatasetRecord).filter(
+        DatasetRecord.owner_id == request_user_id(request),
+    )
+    if q and q.strip():
+        search_term = f"%{q.strip()}%"
+        query = query.filter(DatasetRecord.name.ilike(search_term))
+    query = query.order_by(DatasetRecord.created_at.desc())
+    if offset is not None:
+        query = query.offset(offset)
+    if limit is not None:
+        query = query.limit(limit)
+    records = query.all()
     return [
         {
             "id": r.id,
@@ -331,7 +366,7 @@ def _quality_report(real: pd.DataFrame, synthetic: pd.DataFrame):
     }
 
 
-def _run_synthesis(job_id: str, dataset_path: str, original_name: str, request: SynthesisRequest):
+def _run_synthesis(job_id: str, dataset_path: str, original_name: str, request: SynthesisRequest, owner_id: str):
     db = None
     output_path = None
     try:
@@ -357,6 +392,7 @@ def _run_synthesis(job_id: str, dataset_path: str, original_name: str, request: 
         db = SessionLocal()
         record = DatasetRecord(
             id=dataset_id,
+            owner_id=owner_id,
             name=f"{original_name}_synthetic",
             filename=filename,
             filepath=str(output_path),
@@ -402,7 +438,7 @@ def _run_synthesis(job_id: str, dataset_path: str, original_name: str, request: 
 
 
 @router.post("/{dataset_id}/synthesize")
-def synthesize_dataset(dataset_id: str, body: SynthesisRequest, db: Session = Depends(get_db)):
+def synthesize_dataset(dataset_id: str, body: SynthesisRequest, request: Request, db: Session = Depends(get_db)):
     allowed_methods = {"bootstrap", "smote", "gaussian_copula", "ctgan"}
     if body.method not in allowed_methods:
         raise HTTPException(400, f"method must be one of: {', '.join(sorted(allowed_methods))}.")
@@ -410,7 +446,11 @@ def synthesize_dataset(dataset_id: str, body: SynthesisRequest, db: Session = De
         raise HTTPException(400, f"{body.method} requires SDV. Install it with: pip install sdv")
     if body.method == "smote" and importlib.util.find_spec("imblearn") is None:
         raise HTTPException(400, "SMOTE requires imbalanced-learn. Install it with: pip install imbalanced-learn")
-    dataset = db.query(DatasetRecord).filter(DatasetRecord.id == dataset_id).first()
+    owner_id = request_user_id(request)
+    dataset = db.query(DatasetRecord).filter(
+        DatasetRecord.id == dataset_id,
+        DatasetRecord.owner_id == owner_id,
+    ).first()
     if not dataset:
         raise HTTPException(404, "Dataset not found.")
     if body.method == "smote" and not body.target_column:
@@ -420,25 +460,29 @@ def synthesize_dataset(dataset_id: str, body: SynthesisRequest, db: Session = De
     with _SYNTHESIS_LOCK:
         _SYNTHESIS_JOBS[job_id] = {
             "job_id": job_id,
+            "owner_id": owner_id,
             "status": "pending",
             "progress": 0,
             "message": "Queued...",
         }
-    _SYNTHESIS_EXECUTOR.submit(_run_synthesis, job_id, dataset.filepath, dataset.name, body)
+    _SYNTHESIS_EXECUTOR.submit(_run_synthesis, job_id, dataset.filepath, dataset.name, body, owner_id)
     return {"job_id": job_id, "status": "pending"}
 
 
 @router.get("/synthesis/{job_id}/status")
-def get_synthesis_status(job_id: str):
+def get_synthesis_status(job_id: str, request: Request):
     with _SYNTHESIS_LOCK:
         job = _SYNTHESIS_JOBS.get(job_id)
-        if not job:
+        if not job or job.get("owner_id") != request_user_id(request):
             raise HTTPException(404, "Synthesis job not found.")
         return dict(job)
 
 @router.get("/{dataset_id}/preview")
-def preview_dataset(dataset_id: str, rows: int = Query(100, le=500), db: Session = Depends(get_db)):
-    record = db.query(DatasetRecord).filter(DatasetRecord.id == dataset_id).first()
+def preview_dataset(dataset_id: str, request: Request, rows: int = Query(100, le=500), db: Session = Depends(get_db)):
+    record = db.query(DatasetRecord).filter(
+        DatasetRecord.id == dataset_id,
+        DatasetRecord.owner_id == request_user_id(request),
+    ).first()
     if not record:
         raise HTTPException(404, "Dataset not found.")
 
@@ -456,8 +500,11 @@ def preview_dataset(dataset_id: str, rows: int = Query(100, le=500), db: Session
 
 
 @router.get("/{dataset_id}/profile")
-def profile_dataset_endpoint(dataset_id: str, db: Session = Depends(get_db)):
-    record = db.query(DatasetRecord).filter(DatasetRecord.id == dataset_id).first()
+def profile_dataset_endpoint(dataset_id: str, request: Request, db: Session = Depends(get_db)):
+    record = db.query(DatasetRecord).filter(
+        DatasetRecord.id == dataset_id,
+        DatasetRecord.owner_id == request_user_id(request),
+    ).first()
     if not record:
         raise HTTPException(404, "Dataset not found.")
 
@@ -469,12 +516,15 @@ def profile_dataset_endpoint(dataset_id: str, db: Session = Depends(get_db)):
 
 
 @router.post("/{dataset_id}/suggest-task")
-def suggest_task(dataset_id: str, body: dict, db: Session = Depends(get_db)):
+def suggest_task(dataset_id: str, body: dict, request: Request, db: Session = Depends(get_db)):
     target_col = body.get("target_column")
     if not target_col:
         raise HTTPException(400, "target_column is required.")
 
-    record = db.query(DatasetRecord).filter(DatasetRecord.id == dataset_id).first()
+    record = db.query(DatasetRecord).filter(
+        DatasetRecord.id == dataset_id,
+        DatasetRecord.owner_id == request_user_id(request),
+    ).first()
     if not record:
         raise HTTPException(404, "Dataset not found.")
 
@@ -508,8 +558,11 @@ def _validate_target(df: pd.DataFrame, target_column: str, task_type: Optional[s
 
 
 @router.get("/{dataset_id}/target-distribution")
-def target_distribution(dataset_id: str, target_column: str, task_type: str, db: Session = Depends(get_db)):
-    record = db.query(DatasetRecord).filter(DatasetRecord.id == dataset_id).first()
+def target_distribution(dataset_id: str, request: Request, target_column: str, task_type: str, db: Session = Depends(get_db)):
+    record = db.query(DatasetRecord).filter(
+        DatasetRecord.id == dataset_id,
+        DatasetRecord.owner_id == request_user_id(request),
+    ).first()
     if not record:
         raise HTTPException(404, "Dataset not found.")
     df = _load_csv_safe(record.filepath)
@@ -520,8 +573,12 @@ def target_distribution(dataset_id: str, target_column: str, task_type: str, db:
 
 
 @router.delete("/{dataset_id}")
-def delete_dataset(dataset_id: str, db: Session = Depends(get_db)):
-    record = db.query(DatasetRecord).filter(DatasetRecord.id == dataset_id).first()
+def delete_dataset(dataset_id: str, request: Request, db: Session = Depends(get_db)):
+    owner_id = request_user_id(request)
+    record = db.query(DatasetRecord).filter(
+        DatasetRecord.id == dataset_id,
+        DatasetRecord.owner_id == owner_id,
+    ).first()
     if not record:
         raise HTTPException(404, "Dataset not found.")
 
@@ -533,6 +590,61 @@ def delete_dataset(dataset_id: str, db: Session = Depends(get_db)):
     db.delete(record)
     db.commit()
     return {"message": "Dataset deleted."}
+
+
+class DatasetUpdate(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+
+
+@router.patch("/{dataset_id}")
+def update_dataset(dataset_id: str, body: DatasetUpdate, request: Request, db: Session = Depends(get_db)):
+    owner_id = request_user_id(request)
+    record = db.query(DatasetRecord).filter(
+        DatasetRecord.id == dataset_id,
+        DatasetRecord.owner_id == owner_id,
+    ).first()
+    if not record:
+        raise HTTPException(404, "Dataset not found.")
+
+    new_name = body.name.strip()
+    if not new_name.lower().endswith(".csv"):
+        new_name += ".csv"
+    record.name = new_name
+    db.commit()
+    db.refresh(record)
+    return {
+        "id": record.id,
+        "name": record.name,
+        "filename": record.filename,
+        "filepath": record.filepath,
+        "row_count": record.row_count,
+        "col_count": record.col_count,
+        "size_bytes": record.size_bytes,
+        "status": record.status,
+        "created_at": record.created_at.isoformat() if record.created_at else None,
+    }
+
+
+@router.get("/{dataset_id}/download")
+def download_dataset(dataset_id: str, request: Request, db: Session = Depends(get_db)):
+    owner_id = request_user_id(request)
+    record = db.query(DatasetRecord).filter(
+        DatasetRecord.id == dataset_id,
+        DatasetRecord.owner_id == owner_id,
+    ).first()
+    if not record:
+        raise HTTPException(404, "Dataset not found.")
+
+    file_path = Path(record.filepath)
+    if not file_path.exists():
+        raise HTTPException(404, "Dataset file not found on disk.")
+
+    download_name = record.name if record.name.lower().endswith(".csv") else f"{record.name}.csv"
+    return FileResponse(
+        path=str(file_path),
+        filename=download_name,
+        media_type="text/csv",
+    )
 
 
 @router.get("/sample/list")
@@ -555,7 +667,7 @@ def list_sample_datasets():
 
 
 @router.post("/sample/load/{filename}")
-async def load_sample_dataset(filename: str, db: Session = Depends(get_db)):
+async def load_sample_dataset(filename: str, request: Request, db: Session = Depends(get_db)):
     """Load a sample dataset into the system."""
     safe_fn = _safe_filename(filename)
     sample_path = SAMPLE_DIR / safe_fn
@@ -577,6 +689,7 @@ async def load_sample_dataset(filename: str, db: Session = Depends(get_db)):
 
     record = DatasetRecord(
         id=dataset_id,
+        owner_id=request_user_id(request),
         name=Path(filename).stem.replace("_", " ").title(),
         filename=filename,
         filepath=str(dest_path),

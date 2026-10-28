@@ -5,6 +5,7 @@ import uuid
 import time
 import threading
 import traceback
+import math
 import numpy as np
 import joblib
 import json
@@ -34,9 +35,10 @@ def get_job(job_id: str) -> Optional[Dict]:
 
 
 def _update_job(job_id: str, **kwargs):
+    sanitized = {k: _json_value(v) for k, v in kwargs.items()}
     with _jobs_lock:
         if job_id in _jobs:
-            _jobs[job_id].update(kwargs)
+            _jobs[job_id].update(sanitized)
 
 
 def _search_space(model_id: str) -> Dict[str, list]:
@@ -70,12 +72,22 @@ def _search_space(model_id: str) -> Dict[str, list]:
 
 
 def _json_value(value):
+    if value is None:
+        return None
+    if isinstance(value, float):
+        if math.isnan(value) or math.isinf(value):
+            return None
+        return value
     if isinstance(value, dict):
-        return {key: _json_value(item) for key, item in value.items()}
+        return {str(key): _json_value(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         return [_json_value(item) for item in value]
     if isinstance(value, np.generic):
-        return value.item()
+        return _json_value(value.item())
+    if isinstance(value, np.ndarray):
+        return [_json_value(item) for item in value.tolist()]
+    if hasattr(value, "__class__") and "device" in value.__class__.__name__.lower():
+        return str(value)
     return value
 
 
@@ -292,7 +304,8 @@ def run_training_job(experiment_id: str, job_config: Dict[str, Any]):
                 )
 
             if job_config["model_id"] in {"pytorch_mlp", "tabnet", "ft_transformer"}:
-                _update_job(job_id, device=getattr(model, "device", "cpu"))
+                dev = getattr(model, "device", "cpu")
+                _update_job(job_id, device=str(dev) if dev is not None else "cpu")
                 fit_result = model.fit(X_tr, y_tr, X_val, y_val, progress_callback=progress_cb)
             else:
                 fit_result = model.fit(X_tr, y_tr)

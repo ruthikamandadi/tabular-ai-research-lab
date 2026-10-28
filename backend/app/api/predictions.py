@@ -10,20 +10,30 @@ import pandas as pd
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
-from fastapi import APIRouter, HTTPException, UploadFile, File, Depends
+from fastapi import APIRouter, HTTPException, UploadFile, File, Depends, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db, ExperimentRecord, DatasetRecord
+from app.core.auth import request_user_id, require_authenticated_user
 
-router = APIRouter(prefix="/api/models", tags=["predictions"])
+router = APIRouter(
+    prefix="/api/models",
+    tags=["predictions"],
+    dependencies=[Depends(require_authenticated_user)],
+)
 
 
-def _load_model_and_meta(experiment_id: str, db: Session):
-    record = db.query(ExperimentRecord).filter(ExperimentRecord.id == experiment_id).first()
-    if not record or record.status != "completed":
-        raise HTTPException(400, f"Experiment not completed or not found.")
+def _load_model_and_meta(experiment_id: str, owner_id: str, db: Session):
+    record = db.query(ExperimentRecord).filter(
+        ExperimentRecord.id == experiment_id,
+        ExperimentRecord.owner_id == owner_id,
+    ).first()
+    if not record:
+        raise HTTPException(404, "Experiment not found.")
+    if record.status != "completed":
+        raise HTTPException(400, "Experiment has not completed.")
 
     artifact_dir = Path(record.artifact_path)
     meta_path = artifact_dir / "meta.json"
@@ -51,6 +61,7 @@ def _load_model_and_meta(experiment_id: str, db: Session):
 @router.post("/{experiment_id}/predict-csv")
 async def predict_csv(
     experiment_id: str,
+    request: Request,
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
 ):
@@ -64,7 +75,9 @@ async def predict_csv(
     except Exception as e:
         raise HTTPException(400, f"Could not parse CSV: {e}")
 
-    model, preprocessor, label_encoder, meta, record = _load_model_and_meta(experiment_id, db)
+    model, preprocessor, label_encoder, meta, record = _load_model_and_meta(
+        experiment_id, request_user_id(request), db
+    )
     input_cols = meta["input_feature_cols"]
 
     # Remove target column if present
@@ -116,11 +129,14 @@ class SingleRowPredictRequest(BaseModel):
 @router.post("/{experiment_id}/predict-single")
 def predict_single(
     experiment_id: str,
+    request: Request,
     body: SingleRowPredictRequest,
     db: Session = Depends(get_db),
 ):
     """Single-row prediction from JSON feature dict."""
-    model, preprocessor, label_encoder, meta, record = _load_model_and_meta(experiment_id, db)
+    model, preprocessor, label_encoder, meta, record = _load_model_and_meta(
+        experiment_id, request_user_id(request), db
+    )
     input_cols = meta["input_feature_cols"]
 
     row = {}
@@ -161,11 +177,16 @@ def predict_single(
 
 
 @router.get("/{experiment_id}/schema")
-def get_model_schema(experiment_id: str, db: Session = Depends(get_db)):
+def get_model_schema(experiment_id: str, request: Request, db: Session = Depends(get_db)):
     """Return expected input feature schema for a trained model."""
-    model, preprocessor, label_encoder, meta, record = _load_model_and_meta(experiment_id, db)
+    model, preprocessor, label_encoder, meta, record = _load_model_and_meta(
+        experiment_id, request_user_id(request), db
+    )
 
-    dataset = db.query(DatasetRecord).filter(DatasetRecord.id == record.dataset_id).first()
+    dataset = db.query(DatasetRecord).filter(
+        DatasetRecord.id == record.dataset_id,
+        DatasetRecord.owner_id == request_user_id(request),
+    ).first()
     if not dataset:
         raise HTTPException(404, "Original dataset not found.")
 

@@ -11,16 +11,7 @@ import importlib.util
 from typing import Dict, Any, List, Optional, Tuple
 from pathlib import Path
 
-from sklearn.linear_model import LogisticRegression, Ridge
-from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor, GradientBoostingClassifier, GradientBoostingRegressor
-from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
-from sklearn.base import BaseEstimator
-
-try:
-    import xgboost as xgb
-    XGBOOST_AVAILABLE = True
-except ImportError:
-    XGBOOST_AVAILABLE = False
+XGBOOST_AVAILABLE = importlib.util.find_spec("xgboost") is not None
 
 torch = None
 nn = None
@@ -83,7 +74,7 @@ def get_torch():
 class SklearnModelWrapper:
     """Wraps any sklearn estimator with a common interface."""
 
-    def __init__(self, estimator: BaseEstimator, task_type: str):
+    def __init__(self, estimator: Any, task_type: str):
         self.estimator = estimator
         self.task_type = task_type
         self.training_history = []
@@ -191,7 +182,7 @@ class PyTorchMLPWrapper:
         input_dim = X_train.shape[1]
         self.model = self._build_model(input_dim, self.n_classes)
         optimizer = optim.Adam(self.model.parameters(), lr=lr, weight_decay=weight_decay)
-        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, factor=0.5, verbose=False)
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, factor=0.5)
 
         # Loss function
         if self.task_type == "binary_classification":
@@ -695,6 +686,15 @@ def get_available_models() -> List[Dict]:
 
 def build_model(model_id: str, task_type: str, model_config: Dict[str, Any]):
     """Factory: return initialized model wrapper."""
+    from sklearn.ensemble import (
+        GradientBoostingClassifier,
+        GradientBoostingRegressor,
+        RandomForestClassifier,
+        RandomForestRegressor,
+    )
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
+
     seed = model_config.get("random_seed", 42)
 
     if model_id == "logistic_regression":
@@ -739,6 +739,8 @@ def build_model(model_id: str, task_type: str, model_config: Dict[str, Any]):
         return SklearnModelWrapper(est, task_type)
 
     elif model_id == "xgboost" and XGBOOST_AVAILABLE:
+        import xgboost as xgb
+
         n_est = int(model_config.get("n_estimators", 100))
         max_d = int(model_config.get("max_depth", 6))
         lr = float(model_config.get("learning_rate", 0.1))

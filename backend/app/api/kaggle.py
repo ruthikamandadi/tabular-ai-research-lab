@@ -13,7 +13,7 @@ from pathlib import Path, PurePosixPath
 from typing import Optional
 
 import pandas as pd
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -24,8 +24,9 @@ from app.core.config import (
     UPLOADS_DIR,
 )
 from app.core.database import DatasetRecord, get_db
+from app.core.auth import request_user_id, require_authenticated_user
 
-router = APIRouter(prefix="/api/kaggle", tags=["kaggle"])
+router = APIRouter(prefix="/api/kaggle", tags=["kaggle"], dependencies=[Depends(require_authenticated_user)])
 logger = logging.getLogger(__name__)
 _KAGGLE_ENV_LOCK = threading.Lock()
 
@@ -166,7 +167,7 @@ def search_kaggle_datasets(q: str = Query(min_length=1, max_length=200)):
 
 
 @router.post("/import")
-def import_kaggle_dataset(body: KaggleImportRequest, db: Session = Depends(get_db)):
+def import_kaggle_dataset(body: KaggleImportRequest, request: Request, db: Session = Depends(get_db)):
     ref = body.ref.strip().strip("/")
     if len(ref.split("/")) != 2 or any(part in ("", ".", "..") for part in ref.split("/")):
         raise HTTPException(400, "Dataset ref must use the owner/name format.")
@@ -238,6 +239,7 @@ def import_kaggle_dataset(body: KaggleImportRequest, db: Session = Depends(get_d
     source_title = getattr(detail, "title", None) or ref
     record = DatasetRecord(
         id=dataset_id,
+        owner_id=request_user_id(request),
         name=Path(source_title).stem,
         filename=dest_path.name,
         filepath=str(dest_path),

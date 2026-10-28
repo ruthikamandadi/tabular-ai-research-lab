@@ -1,10 +1,10 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { useDropzone } from 'react-dropzone';
-import { Upload, Database, Trash2, CheckCircle, AlertCircle, FileText, Clock, RefreshCw, Search, Sparkles, Download } from 'lucide-react';
+import { Upload, Database, Trash2, CheckCircle, AlertCircle, FileText, Clock, RefreshCw, Search, Sparkles, Download, Edit2 } from 'lucide-react';
 import {
   uploadDataset, listDatasets, deleteDataset, loadSampleDataset, listSampleDatasets,
   searchKaggleDatasets, importKaggleDataset, getSynthesisMethods, synthesizeDataset,
-  getSynthesisStatus,
+  getSynthesisStatus, renameDataset, getDatasetDownloadUrl,
 } from '../services/api';
 import { useApp } from '../contexts/AppContext';
 import { useNavigate } from 'react-router-dom';
@@ -27,6 +27,8 @@ export default function Datasets() {
   const { setSelectedDataset } = useApp();
   const [datasets, setDatasets] = useState([]);
   const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [uploadSuccess, setUploadSuccess] = useState('');
   const [uploadError, setUploadError] = useState(null);
   const [loading, setLoading] = useState(true);
   const [datasetError, setDatasetError] = useState('');
@@ -48,12 +50,38 @@ export default function Datasets() {
   const [synthesisTarget, setSynthesisTarget] = useState('');
   const [synthesisJob, setSynthesisJob] = useState(null);
   const [synthesisError, setSynthesisError] = useState('');
+  const [registrySearch, setRegistrySearch] = useState('');
+  const [currentPage, setCurrentPage] = useState(1);
+  const PAGE_SIZE = 10;
 
   const refresh = useCallback(() => {
     setLoading(true);
     setDatasetError('');
     listDatasets().then(r => setDatasets(r.data)).catch(error => setDatasetError(error.message)).finally(() => setLoading(false));
   }, []);
+
+  const handleRename = async (ds) => {
+    const newName = window.prompt('Enter new dataset name:', ds.name);
+    if (!newName || !newName.trim() || newName.trim() === ds.name) return;
+    try {
+      await renameDataset(ds.id, newName.trim());
+      await refresh();
+    } catch (e) {
+      alert('Rename failed: ' + e.message);
+    }
+  };
+
+  const filteredDatasets = useMemo(() => {
+    if (!registrySearch.trim()) return datasets;
+    const q = registrySearch.toLowerCase().trim();
+    return datasets.filter(d => d.name?.toLowerCase().includes(q));
+  }, [datasets, registrySearch]);
+
+  const totalPages = Math.max(1, Math.ceil(filteredDatasets.length / PAGE_SIZE));
+  const paginatedDatasets = useMemo(() => {
+    const start = (currentPage - 1) * PAGE_SIZE;
+    return filteredDatasets.slice(start, start + PAGE_SIZE);
+  }, [filteredDatasets, currentPage]);
 
   useEffect(() => {
     refresh();
@@ -82,21 +110,31 @@ export default function Datasets() {
 
   const onDrop = useCallback(async (accepted, rejected) => {
     setUploadError(null);
+    setUploadSuccess('');
+    setUploadProgress(0);
     if (rejected.length > 0) {
       setUploadError('Invalid file. Only CSV files are accepted (max 200MB).');
       return;
     }
     if (accepted.length === 0) return;
     const file = accepted[0];
+    if (file.size > 200 * 1024 * 1024) {
+      setUploadError('File exceeds 200MB limit.');
+      return;
+    }
     setUploading(true);
     try {
-      const r = await uploadDataset(file);
+      const r = await uploadDataset(file, (progress) => {
+        setUploadProgress(progress);
+      });
       setSelectedDataset(r.data);
+      setUploadSuccess(`Dataset "${file.name}" uploaded successfully!`);
       await refresh();
     } catch (e) {
       setUploadError(e.message);
     } finally {
       setUploading(false);
+      setUploadProgress(0);
     }
   }, [refresh, setSelectedDataset]);
 
@@ -215,7 +253,19 @@ export default function Datasets() {
           <RefreshCw size={14} /> Refresh
         </button>
       </div>
-      {datasetError && <div className="error-box mb-4"><AlertCircle size={14} />{datasetError}</div>}
+      {datasetError && (
+        <div className="error-box mb-4 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <AlertCircle size={14} className="shrink-0" />
+            <span>{datasetError}</span>
+          </div>
+          {(datasetError.toLowerCase().includes('auth') || datasetError.toLowerCase().includes('session')) && (
+            <button onClick={() => navigate('/login')} className="btn-secondary text-xs px-2.5 py-1">
+              Sign In
+            </button>
+          )}
+        </div>
+      )}
 
       <div className="mb-5 flex flex-wrap gap-2 border-b border-slate-200">
         {[
@@ -399,6 +449,26 @@ export default function Datasets() {
             </>
           )}
         </div>
+        {uploading && (
+          <div className="mt-4">
+            <div className="flex justify-between text-xs text-blue-600 font-medium mb-1.5">
+              <span>Uploading & parsing dataset...</span>
+              <span>{uploadProgress}%</span>
+            </div>
+            <div className="h-2 w-full bg-slate-100 rounded-full overflow-hidden">
+              <div
+                className="h-full bg-blue-600 rounded-full transition-all duration-300"
+                style={{ width: `${Math.max(uploadProgress, 5)}%` }}
+              />
+            </div>
+          </div>
+        )}
+        {uploadSuccess && (
+          <div className="flex items-center gap-2 p-3 mt-3 bg-green-50 border border-green-200 rounded-lg text-green-700 text-sm">
+            <CheckCircle size={15} className="shrink-0" />
+            <span>{uploadSuccess}</span>
+          </div>
+        )}
         {uploadError && (
           <div className="error-box mt-3">
             <AlertCircle size={14} className="shrink-0 mt-0.5" />
@@ -429,55 +499,133 @@ export default function Datasets() {
 
       {/* Dataset list */}
       <div className="card">
-        <h2 className="section-title">Dataset Registry ({datasets.length})</h2>
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4">
+          <h2 className="section-title mb-0">Dataset Registry ({datasets.length})</h2>
+          {datasets.length > 0 && (
+            <div className="relative w-full sm:w-64">
+              <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+              <input
+                type="text"
+                className="input-field pl-9 py-1.5 text-xs w-full"
+                placeholder="Search datasets..."
+                value={registrySearch}
+                onChange={e => {
+                  setRegistrySearch(e.target.value);
+                  setCurrentPage(1);
+                }}
+              />
+            </div>
+          )}
+        </div>
+
         {loading ? (
           <div className="space-y-3">
             {[...Array(3)].map((_, i) => (
               <div key={i} className="skeleton h-14 rounded-lg" />
             ))}
           </div>
-        ) : datasets.length === 0 ? (
+        ) : filteredDatasets.length === 0 ? (
           <div className="text-center py-12 text-slate-400">
-            <Database size={40} className="mx-auto mb-3 opacity-40" />
-            <div className="text-sm">No datasets uploaded yet. Upload a CSV or load a sample dataset.</div>
+            <Database size={44} className="mx-auto mb-3 opacity-30 text-blue-500" />
+            <div className="text-base font-medium text-slate-700 mb-1">
+              {datasets.length === 0 ? 'No datasets in your registry' : 'No matching datasets found'}
+            </div>
+            <div className="text-xs text-slate-400 max-w-sm mx-auto">
+              {datasets.length === 0
+                ? 'Upload a CSV file (up to 200MB) above or load a sample dataset to start analyzing and training models.'
+                : 'Try adjusting your search query to find the dataset you are looking for.'}
+            </div>
           </div>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full">
-              <thead>
-                <tr>
-                  <th className="table-th">Name</th>
-                  <th className="table-th">Rows</th>
-                  <th className="table-th">Columns</th>
-                  <th className="table-th">Size</th>
-                  <th className="table-th">Status</th>
-                  <th className="table-th">Uploaded</th>
-                  <th className="table-th">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {datasets.map(ds => (
-                  <tr key={ds.id} className="hover:bg-slate-50 cursor-pointer" onClick={() => handleSelect(ds)}>
-                    <td className="table-td font-medium text-blue-600">{ds.name}</td>
-                    <td className="table-td">{ds.row_count?.toLocaleString()}</td>
-                    <td className="table-td">{ds.col_count}</td>
-                    <td className="table-td">{formatSize(ds.size_bytes)}</td>
-                    <td className="table-td">
-                      <span className={`badge ${ds.status === 'ready' ? 'badge-green' : 'badge-red'}`}>
-                        {ds.status}
-                      </span>
-                    </td>
-                    <td className="table-td text-slate-400">{formatDate(ds.created_at)}</td>
-                    <td className="table-td" onClick={e => e.stopPropagation()}>
-                      <button onClick={() => handleDelete(ds.id)} className="text-red-400 hover:text-red-600 transition-colors p-1">
-                        <Trash2 size={14} />
-                      </button>
-                    </td>
+          <>
+            <div className="overflow-x-auto">
+              <table className="w-full">
+                <thead>
+                  <tr>
+                    <th className="table-th">Name</th>
+                    <th className="table-th">Rows</th>
+                    <th className="table-th">Columns</th>
+                    <th className="table-th">Size</th>
+                    <th className="table-th">Status</th>
+                    <th className="table-th">Uploaded</th>
+                    <th className="table-th text-right">Actions</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                </thead>
+                <tbody>
+                  {paginatedDatasets.map(ds => (
+                    <tr key={ds.id} className="hover:bg-slate-50 cursor-pointer" onClick={() => handleSelect(ds)}>
+                      <td className="table-td font-medium text-blue-600">
+                        <div className="flex items-center gap-1.5">
+                          <span>{ds.name}</span>
+                          {ds.is_synthetic && <span className="badge badge-purple text-[10px]">Synthetic</span>}
+                        </div>
+                      </td>
+                      <td className="table-td">{ds.row_count?.toLocaleString()}</td>
+                      <td className="table-td">{ds.col_count}</td>
+                      <td className="table-td">{formatSize(ds.size_bytes)}</td>
+                      <td className="table-td">
+                        <span className={`badge ${ds.status === 'ready' ? 'badge-green' : 'badge-red'}`}>
+                          {ds.status}
+                        </span>
+                      </td>
+                      <td className="table-td text-slate-400">{formatDate(ds.created_at)}</td>
+                      <td className="table-td text-right" onClick={e => e.stopPropagation()}>
+                        <div className="flex items-center justify-end gap-1">
+                          <a
+                            href={getDatasetDownloadUrl(ds.id)}
+                            download={ds.name}
+                            className="text-slate-400 hover:text-blue-600 transition-colors p-1"
+                            title="Download dataset CSV"
+                          >
+                            <Download size={14} />
+                          </a>
+                          <button
+                            onClick={() => handleRename(ds)}
+                            className="text-slate-400 hover:text-slate-700 transition-colors p-1"
+                            title="Rename dataset"
+                          >
+                            <Edit2 size={14} />
+                          </button>
+                          <button
+                            onClick={() => handleDelete(ds.id)}
+                            className="text-slate-400 hover:text-red-600 transition-colors p-1"
+                            title="Delete dataset"
+                          >
+                            <Trash2 size={14} />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            {totalPages > 1 && (
+              <div className="flex items-center justify-between border-t border-slate-100 pt-3 mt-3 text-xs text-slate-500">
+                <span>
+                  Showing {(currentPage - 1) * PAGE_SIZE + 1}–{Math.min(currentPage * PAGE_SIZE, filteredDatasets.length)} of {filteredDatasets.length} datasets
+                </span>
+                <div className="flex items-center gap-1">
+                  <button
+                    disabled={currentPage === 1}
+                    onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+                    className="btn-secondary px-2.5 py-1 text-xs disabled:opacity-40"
+                  >
+                    Previous
+                  </button>
+                  <span className="px-2">Page {currentPage} of {totalPages}</span>
+                  <button
+                    disabled={currentPage === totalPages}
+                    onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
+                    className="btn-secondary px-2.5 py-1 text-xs disabled:opacity-40"
+                  >
+                    Next
+                  </button>
+                </div>
+              </div>
+            )}
+          </>
         )}
       </div>
     </div>

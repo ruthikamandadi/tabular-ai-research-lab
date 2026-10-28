@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import APP_TITLE, APP_VERSION, FRONTEND_ORIGINS
 from app.core.database import init_db
 from app.api import datasets, experiments, kaggle, predictions, reports, settings
+from app.core import auth
 
 app = FastAPI(title=APP_TITLE, version=APP_VERSION, docs_url="/api/docs", redoc_url="/api/redoc")
 
@@ -20,6 +21,7 @@ app.add_middleware(
 )
 
 # Register routers
+app.include_router(auth.router)
 app.include_router(datasets.router)
 app.include_router(experiments.router)
 app.include_router(predictions.router)
