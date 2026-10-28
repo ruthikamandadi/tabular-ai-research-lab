@@ -93,7 +93,7 @@ function StepCard({ num, title, desc, done, onClick, btnText }) {
 
 export default function Overview() {
   const navigate = useNavigate();
-  const { selectedDataset, setSelectedDataset, setTargetColumn, setTaskType } = useApp();
+  const { selectedDataset, setSelectedDataset, setTargetColumn, setTaskType, setPreprocessingConfig } = useApp();
   const [stats, setStats] = useState({ datasets: 0, experiments: 0, completed: 0, bestScore: null });
   const [backendOk, setBackendOk] = useState(null);
   const [sampleDatasets, setSampleDatasets] = useState([]);
@@ -214,6 +214,27 @@ export default function Overview() {
     }
   };
 
+  const handleDemoTimeSeries = async (filename) => {
+    setLoadingSample(filename);
+    try {
+      const r = await loadSampleDataset(filename);
+      setSelectedDataset(r.data);
+      setTargetColumn('sales');
+      setTaskType('time_series');
+      setPreprocessingConfig(prev => ({
+        ...prev,
+        time_series_date_column: 'date',
+        time_series_lags: [1, 7, 14],
+        time_series_rolling_windows: [3, 7],
+      }));
+      navigate('/model-lab');
+    } catch (e) {
+      setDemoError(`Failed to load time-series demo: ${e.message}`);
+    } finally {
+      setLoadingSample(null);
+    }
+  };
+
   return (
     <div>
       <div className="flex items-center justify-between mb-8">
@@ -308,10 +329,23 @@ export default function Overview() {
               <div key={s.filename} className="card-sm hover:shadow-card-md transition-shadow">
                 <div className="font-medium text-sm text-slate-800 mb-1">{s.name}</div>
                 <div className="text-xs text-slate-400 mb-3">{s.columns?.length} columns · {(s.size_bytes/1024).toFixed(1)} KB</div>
-                <button onClick={() => handleLoadSample(s.filename)} disabled={loadingSample === s.filename}
-                  className="btn-primary text-xs px-3 py-1.5 w-full justify-center">
-                  {loadingSample === s.filename ? 'Loading...' : 'Load Dataset'}
-                </button>
+                {s.filename === 'daily_sales.csv' ? (
+                  <div className="flex gap-2">
+                    <button onClick={() => handleLoadSample(s.filename)} disabled={loadingSample === s.filename}
+                      className="btn-secondary text-xs px-2 py-1.5 flex-1 justify-center">
+                      {loadingSample === s.filename ? 'Loading...' : 'Load'}
+                    </button>
+                    <button onClick={() => handleDemoTimeSeries(s.filename)} disabled={loadingSample === s.filename}
+                      className="btn-primary text-xs px-2 py-1.5 flex-1 justify-center bg-amber-600 hover:bg-amber-700 text-white">
+                      Demo
+                    </button>
+                  </div>
+                ) : (
+                  <button onClick={() => handleLoadSample(s.filename)} disabled={loadingSample === s.filename}
+                    className="btn-primary text-xs px-3 py-1.5 w-full justify-center">
+                    {loadingSample === s.filename ? 'Loading...' : 'Load Dataset'}
+                  </button>
+                )}
               </div>
             ))}
           </div>

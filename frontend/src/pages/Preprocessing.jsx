@@ -185,7 +185,7 @@ export default function Preprocessing() {
               </div>
               <div>
                 <label className="label">Rolling Windows</label>
-                <input className="input-field" defaultValue={(cfg.time_series_rolling_windows || [7]).join(', ')}
+                <input className="input-field" defaultValue={(cfg.time_series_rolling_windows || [3, 7]).join(', ')}
                   onBlur={e => {
                     const windows = e.target.value.split(',').map(value => Number(value.trim())).filter(value => Number.isInteger(value) && value > 1);
                     setCfg('time_series_rolling_windows', windows);

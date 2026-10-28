@@ -564,6 +564,16 @@ class FTTransformerModelWrapper:
 def get_available_models() -> List[Dict]:
     models = [
         {
+            "id": "linear_regression",
+            "name": "Linear Regression",
+            "description": "Standard ordinary least squares regression for continuous targets and time-series forecasting.",
+            "tasks": ["regression", "time_series"],
+            "type": "sklearn",
+            "params": [
+                {"name": "fit_intercept", "label": "Fit Intercept", "type": "bool", "default": True},
+            ],
+        },
+        {
             "id": "logistic_regression",
             "name": "Logistic Regression",
             "description": "Linear model for classification. Fast, interpretable, good baseline.",
@@ -692,12 +702,17 @@ def build_model(model_id: str, task_type: str, model_config: Dict[str, Any]):
         RandomForestClassifier,
         RandomForestRegressor,
     )
-    from sklearn.linear_model import LogisticRegression
+    from sklearn.linear_model import LinearRegression, LogisticRegression
     from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
 
     seed = model_config.get("random_seed", 42)
 
-    if model_id == "logistic_regression":
+    if model_id == "linear_regression":
+        fit_intercept = bool(model_config.get("fit_intercept", True))
+        est = LinearRegression(fit_intercept=fit_intercept)
+        return SklearnModelWrapper(est, task_type)
+
+    elif model_id == "logistic_regression":
         est = LogisticRegression(
             C=float(model_config.get("C", 1.0)),
             max_iter=int(model_config.get("max_iter", 1000)),

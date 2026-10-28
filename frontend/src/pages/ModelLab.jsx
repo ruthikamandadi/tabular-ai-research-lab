@@ -54,6 +54,12 @@ function ModelCard({ model, taskType, selected, onSelect, onConfigChange, config
                   <option value="uniform">uniform</option>
                   <option value="distance">distance</option>
                 </select>
+              ) : p.type === 'bool' ? (
+                <label className="flex items-center gap-2 mt-2 cursor-pointer">
+                  <input type="checkbox" defaultChecked={config?.[p.name] ?? p.default ?? true}
+                    onChange={e => onConfigChange(model.id, p.name, e.target.checked)} />
+                  <span className="text-xs text-slate-600">Enabled</span>
+                </label>
               ) : (
                 <input className="input-field" type="number" step={p.type === 'float' ? 0.001 : 1}
                   min={p.min} max={p.max}

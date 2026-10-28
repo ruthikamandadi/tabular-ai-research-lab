@@ -19,7 +19,7 @@ export function AppProvider({ children }) {
     handle_constant: true,
     time_series_date_column: '',
     time_series_lags: [1, 7, 14],
-    time_series_rolling_windows: [7],
+    time_series_rolling_windows: [3, 7],
   });
   const [selectedExperiments, setSelectedExperiments] = useState([]);
 

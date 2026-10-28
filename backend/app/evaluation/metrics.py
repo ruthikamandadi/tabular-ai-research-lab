@@ -94,6 +94,7 @@ def compute_time_series_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[
         "mae": round(float(mean_absolute_error(actual, predicted)), 6),
         "rmse": round(float(np.sqrt(mean_squared_error(actual, predicted))), 6),
         "mape": round(mape, 6) if mape is not None else None,
+        "r2": round(float(r2_score(actual, predicted)), 6),
     }
 
 

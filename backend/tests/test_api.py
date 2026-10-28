@@ -1167,3 +1167,203 @@ def test_e2e_demo_churn_full_workflow(unauthenticated_client, monkeypatch, tmp_p
     assert logout_res.json()["message"] in ("Signed out.", "Logged out")
 
 
+
+
+def test_time_series_split_is_chronological():
+    import numpy as np
+    import pandas as pd
+    from app.preprocessing.pipeline import build_preprocessing_pipeline
+
+    n = 60
+    dates = pd.date_range("2024-01-01", periods=n, freq="D").strftime("%Y-%m-%d")
+    df = pd.DataFrame({
+        "date": dates,
+        "sales": np.arange(n, dtype=float) * 1.5 + 10.0,
+        "feature": np.sin(np.arange(n)),
+    })
+    prep = build_preprocessing_pipeline(
+        df,
+        "sales",
+        "time_series",
+        {"time_series_date_column": "date", "test_size": 0.2, "time_series_lags": [1, 7], "time_series_rolling_windows": [3]},
+    )
+    assert prep["is_time_series"] is True
+    assert prep["test_dates"] is not None
+    test_dates = pd.to_datetime(prep["test_dates"])
+    assert test_dates.is_monotonic_increasing
+    assert len(test_dates) == prep["n_test"]
+    assert prep["n_train"] > prep["n_test"]
+
+
+def test_time_series_lags_use_only_past_values():
+    import numpy as np
+    import pandas as pd
+    from app.preprocessing.pipeline import build_preprocessing_pipeline
+
+    n = 40
+    dates = pd.date_range("2024-01-01", periods=n, freq="D").strftime("%Y-%m-%d")
+    sales = np.arange(n, dtype=float) * 10
+    df = pd.DataFrame({
+        "date": dates,
+        "sales": sales,
+    })
+    lags = [1, 7, 14]
+    windows = [3, 7]
+    prep = build_preprocessing_pipeline(
+        df,
+        "sales",
+        "time_series",
+        {
+            "time_series_date_column": "date",
+            "time_series_lags": lags,
+            "time_series_rolling_windows": windows,
+            "numeric_scaler": "none",
+        },
+    )
+    expected_rows = n - 14
+    assert prep["n_train"] + prep["n_test"] == expected_rows
+    feat_names = prep["feature_names"]
+    assert any("month" in name for name in feat_names)
+    assert any("weekday" in name for name in feat_names)
+    assert any("is_weekend" in name for name in feat_names)
+    for lag in lags:
+        assert any(f"sales_lag_{lag}" in name for name in feat_names)
+
+
+def test_time_series_experiment_trains_and_returns_mae_and_rmse(client):
+    import numpy as np
+    import pandas as pd
+
+    n = 60
+    dates = pd.date_range("2024-01-01", periods=n, freq="D").strftime("%Y-%m-%d")
+    rows = [
+        {
+            "date": dates[i],
+            "sales": float(50.0 + i * 2.0 + (i % 7) * 3.0),
+            "promotions": int(i % 5 == 0),
+        }
+        for i in range(n)
+    ]
+    uploaded = upload_dataset(client, "test_ts_sales.csv", rows)
+    dataset_id = uploaded["id"]
+
+    created = client.post(
+        "/api/experiments",
+        json={
+            "dataset_id": dataset_id,
+            "target_column": "sales",
+            "task_type": "time_series",
+            "model_id": "linear_regression",
+            "model_config": {"fit_intercept": True},
+            "preprocessing_config": {
+                "time_series_date_column": "date",
+                "time_series_lags": [1, 7],
+                "time_series_rolling_windows": [3],
+                "test_size": 0.2,
+            },
+            "random_seed": 42,
+        },
+    )
+    assert created.status_code == 200, created.text
+    experiment_id = created.json()["experiment_id"]
+
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        status_res = client.get(f"/api/experiments/{experiment_id}/status")
+        assert status_res.status_code == 200, status_res.text
+        status_data = status_res.json()
+        if status_data["status"] in ("completed", "failed"):
+            break
+        time.sleep(0.1)
+
+    assert status_data["status"] == "completed", status_data
+    results_res = client.get(f"/api/experiments/{experiment_id}/results")
+    assert results_res.status_code == 200, results_res.text
+    metrics = results_res.json()["metrics"]
+    assert "mae" in metrics
+    assert "rmse" in metrics
+    assert "mape" in metrics
+    assert "r2" in metrics
+    assert metrics["mae"] >= 0
+    assert metrics["rmse"] >= 0
+
+    forecast_data = results_res.json().get("forecast_data")
+    assert forecast_data is not None and len(forecast_data) > 0
+    assert "date" in forecast_data[0]
+    assert "actual" in forecast_data[0]
+    assert "forecast" in forecast_data[0]
+
+
+def test_image_path_skipped_gracefully_when_torchvision_missing(monkeypatch):
+    import numpy as np
+    import pandas as pd
+    import app.preprocessing.pipeline as pipeline_mod
+
+    monkeypatch.setattr(pipeline_mod, "_image_dependencies_available", lambda: False)
+
+    n = 30
+    df = pd.DataFrame({
+        "image_url": [f"https://example.com/images/sample_{i}.png" for i in range(n)],
+        "target": np.arange(n, dtype=float) * 2.0,
+        "feature_x": (np.arange(n) % 4).astype(float),
+    })
+
+    prep = pipeline_mod.build_preprocessing_pipeline(
+        df,
+        "target",
+        "regression",
+        {"numeric_scaler": "standard", "column_types": {"feature_x": "numeric"}},
+    )
+    assert prep is not None
+    assert prep["n_train"] > 0
+    assert "image_url" in prep["skipped_image_columns"]
+    assert any("image_url" in w for w in prep["warnings"])
+
+
+def test_image_embeddings_extracted_and_cached(tmp_path, monkeypatch):
+    from PIL import Image
+    import numpy as np
+    import pandas as pd
+    from app.preprocessing.pipeline import build_preprocessing_pipeline
+    from app.core.config import STORAGE_DIR
+    import torchvision.models
+
+    orig_resnet18 = torchvision.models.resnet18
+    monkeypatch.setattr(torchvision.models, "resnet18", lambda weights=None: orig_resnet18(weights=None))
+
+    img_dir = tmp_path / "test_images"
+    img_dir.mkdir(parents=True, exist_ok=True)
+    img_file = img_dir / "sample_img.png"
+    img = Image.new("RGB", (32, 32), color=(200, 50, 50))
+    img.save(img_file)
+
+    n = 25
+    df = pd.DataFrame({
+        "img_path": [str(img_file)] * n,
+        "target": np.arange(n, dtype=float),
+    })
+
+    prep = build_preprocessing_pipeline(
+        df,
+        "target",
+        "regression",
+        {"column_types": {"img_path": "image_path"}, "handle_constant": False},
+    )
+    assert prep is not None
+    assert prep["n_features"] == 512
+    cache_dir = STORAGE_DIR / "image_cache"
+    assert cache_dir.exists()
+    cached_files = list(cache_dir.glob("*.npy"))
+    assert len(cached_files) > 0
+
+
+def test_capabilities_reports_real_availability(client):
+    res = client.get("/api/settings/capabilities")
+    assert res.status_code == 200, res.text
+    caps = res.json()
+    item = next((c for c in caps if c["key"] == "text_images_timeseries"), None)
+    assert item is not None
+    assert item["available"] is True
+    assert "Time-series forecasting is available." in item["note"]
+    assert "ResNet-18 image embeddings are available." in item["note"]
+    assert "is not accepted by the experiment API" not in item["note"]

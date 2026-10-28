@@ -3,6 +3,9 @@ Preprocessing pipeline builder.
 CRITICAL: Fit preprocessing ONLY on training data, apply to test data.
 """
 import io
+import logging
+import hashlib
+import importlib.util
 import pandas as pd
 import numpy as np
 from typing import Dict, Any, List, Tuple, Optional
@@ -24,6 +27,9 @@ import warnings
 from urllib.parse import urlparse
 from pathlib import Path
 from app.core.datetime_utils import parse_datetime
+from app.core.config import STORAGE_DIR
+
+logger = logging.getLogger(__name__)
 
 warnings.filterwarnings("ignore")
 
@@ -126,21 +132,37 @@ class SentenceEmbeddingTransformer(BaseEstimator, TransformerMixin):
 
 
 class ImageEmbeddingTransformer(BaseEstimator, TransformerMixin):
-    def __init__(self):
+    def __init__(self, batch_size: int = 16, max_images: int = 2000):
+        self.batch_size = batch_size
+        self.max_images = max_images
+        self.device = "cpu"
         self.model = None
         self.transformer = None
-        self.device = "cpu"
+        self._image_class = None
+        self.sampled = False
+        self.sampling_message = ""
 
     def fit(self, X, y=None):
+        return self
+
+    def _init_model(self):
+        if self.model is not None:
+            return
         try:
             import torch
             from torchvision.models import ResNet18_Weights, resnet18
             from torchvision.transforms import Compose, Normalize, Resize, ToTensor
             from PIL import Image
         except ImportError as exc:
-            raise ValueError("Image embeddings need the optional Pillow, torch, and torchvision packages.") from exc
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.model = resnet18(weights=ResNet18_Weights.DEFAULT)
+            raise ValueError(
+                "Image embeddings require 'Pillow' and 'torchvision'. Run: pip install Pillow torchvision"
+            ) from exc
+
+        self.device = "cpu"
+        try:
+            self.model = resnet18(weights=ResNet18_Weights.DEFAULT)
+        except Exception:
+            self.model = resnet18(weights=None)
         self.model.fc = torch.nn.Identity()
         self.model.eval().to(self.device)
         self.transformer = Compose([
@@ -149,30 +171,104 @@ class ImageEmbeddingTransformer(BaseEstimator, TransformerMixin):
             Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ])
         self._image_class = Image
-        return self
 
     def transform(self, X):
+        self._init_model()
         import torch
         import urllib.request
 
-        vectors = []
-        for value in _flatten_text(X):
-            parsed = urlparse(value)
-            if parsed.scheme in ("http", "https"):
-                with urllib.request.urlopen(value, timeout=10) as response:
-                    content = response.read(10 * 1024 * 1024 + 1)
-                if len(content) > 10 * 1024 * 1024:
-                    raise ValueError("Image URL exceeds the 10 MB per-image limit.")
-                image = self._image_class.open(io.BytesIO(content)).convert("RGB")
-            else:
-                image = self._image_class.open(value).convert("RGB")
-            tensor = self.transformer(image).unsqueeze(0).to(self.device)
+        cache_dir = STORAGE_DIR / "image_cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+
+        items = _flatten_text(X)
+        total_items = len(items)
+        if total_items == 0:
+            return np.zeros((0, 512), dtype=float)
+
+        if total_items > self.max_images:
+            self.sampled = True
+            self.sampling_message = (
+                f"Image input contains {total_items} items, capped at {self.max_images} per run. "
+                "Sampling was applied."
+            )
+            logger.warning(self.sampling_message)
+            sample_indices = set(range(self.max_images))
+        else:
+            sample_indices = set(range(total_items))
+
+        embeddings = np.zeros((total_items, 512), dtype=float)
+        indices_to_compute = []
+        hashes_to_compute = []
+        raw_items_to_compute = []
+
+        # Check disk cache first
+        for idx in range(total_items):
+            if idx not in sample_indices:
+                continue
+            item = items[idx]
+            h = hashlib.sha256(item.encode("utf-8")).hexdigest()
+            cache_file = cache_dir / f"{h}.npy"
+            if cache_file.exists():
+                try:
+                    embeddings[idx] = np.load(cache_file)
+                    continue
+                except Exception:
+                    pass
+            indices_to_compute.append(idx)
+            hashes_to_compute.append(h)
+            raw_items_to_compute.append(item)
+
+        # Batch compute missing embeddings (batch size 16, CPU)
+        for b_start in range(0, len(indices_to_compute), self.batch_size):
+            b_end = min(b_start + self.batch_size, len(indices_to_compute))
+            b_indices = indices_to_compute[b_start:b_end]
+            b_hashes = hashes_to_compute[b_start:b_end]
+            b_items = raw_items_to_compute[b_start:b_end]
+
+            tensors = []
+            for item in b_items:
+                try:
+                    parsed = urlparse(item)
+                    if parsed.scheme in ("http", "https"):
+                        with urllib.request.urlopen(item, timeout=10) as response:
+                            content = response.read(10 * 1024 * 1024 + 1)
+                        if len(content) > 10 * 1024 * 1024:
+                            raise ValueError("Image URL exceeds 10 MB limit.")
+                        img = self._image_class.open(io.BytesIO(content)).convert("RGB")
+                    else:
+                        img = self._image_class.open(item).convert("RGB")
+                except Exception:
+                    # Fallback to gray neutral image
+                    img = self._image_class.new("RGB", (224, 224), color=(128, 128, 128))
+                t = self.transformer(img)
+                tensors.append(t)
+
+            batch_tensor = torch.stack(tensors).to(self.device)
             with torch.no_grad():
-                vectors.append(self.model(tensor).cpu().numpy()[0])
-        return np.asarray(vectors)
+                out = self.model(batch_tensor).cpu().numpy()
+                if out.ndim > 2:
+                    out = out.reshape(out.shape[0], -1)
+
+            for i, idx in enumerate(b_indices):
+                vec = out[i]
+                embeddings[idx] = vec
+                cache_file = cache_dir / f"{b_hashes[i]}.npy"
+                try:
+                    np.save(cache_file, vec)
+                except Exception:
+                    pass
+
+        # If sampled, fill unsampled rows with the mean embedding of sampled ones
+        if self.sampled and len(sample_indices) > 0:
+            sampled_mask = np.array([i in sample_indices for i in range(total_items)])
+            mean_emb = embeddings[sampled_mask].mean(axis=0)
+            embeddings[~sampled_mask] = mean_emb
+
+        return embeddings
 
     def get_feature_names_out(self, input_features=None):
-        return np.asarray([f"image_embedding_{index}" for index in range(512)], dtype=object)
+        prefix = input_features[0] if input_features and len(input_features) > 0 else "image"
+        return np.asarray([f"{prefix}_emb_{index}" for index in range(512)], dtype=object)
 
 
 def build_preprocessing_pipeline(
@@ -209,6 +305,8 @@ def build_preprocessing_pipeline(
     if invalid_types:
         raise ValueError(f"Unsupported column type override(s): {sorted(invalid_types)}")
 
+    warnings_list = []
+    calendar_cols = []
     date_col = config.get("time_series_date_column")
     is_time_series = task_type in ("time_series", "time_series_forecasting")
     if is_time_series:
@@ -229,23 +327,64 @@ def build_preprocessing_pipeline(
             raise ValueError("Time-series lags must be positive integers.")
         for lag in lags:
             df[f"{target_col}_lag_{lag}"] = target_series.shift(lag)
-        for window in config.get("time_series_rolling_windows", [7]):
+        for window in config.get("time_series_rolling_windows", [3, 7]):
             if not isinstance(window, int) or window < 2:
                 raise ValueError("Rolling windows must be integers greater than 1.")
             shifted = target_series.shift(1)
             df[f"{target_col}_rolling_mean_{window}"] = shifted.rolling(window).mean()
             df[f"{target_col}_rolling_std_{window}"] = shifted.rolling(window).std()
-        df = df.dropna(subset=[c for c in df.columns if c.startswith(f"{target_col}_lag_") or c.startswith(f"{target_col}_rolling_")]).reset_index(drop=True)
+
+        # Calendar features
+        calendar_cols = [f"{date_col}_month", f"{date_col}_weekday", f"{date_col}_is_weekend"]
+        df[f"{date_col}_month"] = ordered_dates.dt.month.astype(float)
+        df[f"{date_col}_weekday"] = ordered_dates.dt.weekday.astype(float)
+        df[f"{date_col}_is_weekend"] = (ordered_dates.dt.weekday >= 5).astype(float)
+        if "month" not in df.columns:
+            df["month"] = df[f"{date_col}_month"]
+            calendar_cols.append("month")
+        if "weekday" not in df.columns:
+            df["weekday"] = df[f"{date_col}_weekday"]
+            calendar_cols.append("weekday")
+        if "is_weekend" not in df.columns:
+            df["is_weekend"] = df[f"{date_col}_is_weekend"]
+            calendar_cols.append("is_weekend")
+
+        derived_cols = [c for c in df.columns if c.startswith(f"{target_col}_lag_") or c.startswith(f"{target_col}_rolling_")]
+        df = df.dropna(subset=derived_cols).reset_index(drop=True)
 
     if drop_identifiers:
         identifier_cols |= {col for col, kind in detected_types.items() if kind == "identifier"}
         exclude_cols |= identifier_cols
-    exclude_cols |= {col for col, kind in detected_types.items() if kind == "image_path" and not _image_dependencies_available()}
+
+    skipped_image_cols = []
+    if not _image_dependencies_available():
+        missing_pkgs = []
+        if importlib.util.find_spec("PIL") is None:
+            missing_pkgs.append("Pillow")
+        if importlib.util.find_spec("torch") is None:
+            missing_pkgs.append("torch")
+        if importlib.util.find_spec("torchvision") is None:
+            missing_pkgs.append("torchvision")
+        if not missing_pkgs:
+            missing_pkgs = ["Pillow", "torchvision"]
+
+        for col, kind in detected_types.items():
+            if kind == "image_path":
+                skipped_image_cols.append(col)
+                exclude_cols.add(col)
+                msg = (
+                    f"Skipped image column '{col}': image embeddings require {' and '.join(missing_pkgs)}. "
+                    f"Install with: pip install {' '.join(missing_pkgs)}"
+                )
+                warnings_list.append(msg)
+                logger.warning(msg)
+    else:
+        exclude_cols |= {col for col, kind in detected_types.items() if kind == "image_path" and not _image_dependencies_available()}
 
     # Drop excluded columns
     feature_cols = [c for c in df.columns if c != target_col and c not in exclude_cols]
-    if is_time_series and date_col not in feature_cols:
-        feature_cols.append(date_col)
+    if is_time_series and date_col in feature_cols:
+        feature_cols.remove(date_col)
 
     # Drop constant columns
     dropped_constants = []
@@ -296,9 +435,9 @@ def build_preprocessing_pipeline(
     date_features = [c for c in feature_cols if detected_types.get(c) == "date"]
     image_features = [c for c in feature_cols if detected_types.get(c) == "image_path" and _image_dependencies_available()]
     if is_time_series:
-        derived_lags = [c for c in feature_cols if c.startswith(f"{target_col}_lag_") or c.startswith(f"{target_col}_rolling_")]
+        derived_lags = [c for c in feature_cols if c.startswith(f"{target_col}_lag_") or c.startswith(f"{target_col}_rolling_") or c in calendar_cols]
         numeric_features = list(dict.fromkeys(numeric_features + derived_lags))
-        date_features = list(dict.fromkeys(date_features + [date_col]))
+        date_features = [c for c in date_features if c != date_col]
         categorical_features = [c for c in categorical_features if c != date_col]
 
     # Numeric pipeline
@@ -347,9 +486,14 @@ def build_preprocessing_pipeline(
     if date_features:
         transformers.append(("date", DateFeatureExtractor(), date_features))
     if image_features:
-        transformers.append(("image", ImageEmbeddingTransformer(), image_features))
+        transformers.append(("image", ImageEmbeddingTransformer(batch_size=16, max_images=2000), image_features))
 
     if not transformers:
+        if skipped_image_cols:
+            raise ValueError(
+                f"No features available: image column(s) {skipped_image_cols} were skipped because "
+                "image embeddings require 'Pillow' and 'torchvision'. Run: pip install Pillow torchvision"
+            )
         raise ValueError("No features available after preprocessing configuration.")
 
     preprocessor = ColumnTransformer(transformers=transformers, remainder="drop", sparse_threshold=0)
@@ -360,6 +504,10 @@ def build_preprocessing_pipeline(
         X_test_transformed = preprocessor.transform(X_test)
     except Exception as exc:
         raise ValueError(f"Could not preprocess columns: {exc}") from exc
+
+    for name, trans, _ in transformers:
+        if name == "image" and getattr(trans, "sampled", False) and getattr(trans, "sampling_message", ""):
+            warnings_list.append(trans.sampling_message)
 
     # Get feature names after transformation
     try:
@@ -387,16 +535,21 @@ def build_preprocessing_pipeline(
         "config": config,
         "test_dates": df.loc[X_test.index, date_col].astype(str).tolist() if is_time_series else None,
         "is_time_series": is_time_series,
+        "warnings": warnings_list,
+        "skipped_image_columns": skipped_image_cols,
     }
 
 
 def _image_dependencies_available():
+    for mod in ("PIL", "torch", "torchvision"):
+        if importlib.util.find_spec(mod) is None:
+            return False
     try:
         import PIL
         import torchvision
         import torch
         return True
-    except ImportError:
+    except (ImportError, ModuleNotFoundError):
         return False
 
 

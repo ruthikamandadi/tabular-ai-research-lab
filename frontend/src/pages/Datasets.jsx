@@ -24,7 +24,7 @@ function formatDate(iso) {
 
 export default function Datasets() {
   const navigate = useNavigate();
-  const { setSelectedDataset } = useApp();
+  const { setSelectedDataset, setTargetColumn, setTaskType, setPreprocessingConfig } = useApp();
   const [datasets, setDatasets] = useState([]);
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
@@ -168,6 +168,30 @@ export default function Datasets() {
       const r = await loadSampleDataset(filename);
       setSelectedDataset(r.data);
       await refresh();
+    } catch (e) {
+      setUploadError(e.message);
+    } finally {
+      setLoadingSample(null);
+    }
+  };
+
+  const handleDemoTimeSeries = async (filename) => {
+    setLoadingSample(filename);
+    setUploadError(null);
+    try {
+      const r = await loadSampleDataset(filename);
+      const ds = r.data;
+      setSelectedDataset(ds);
+      setTargetColumn('sales');
+      setTaskType('time_series');
+      setPreprocessingConfig(prev => ({
+        ...prev,
+        time_series_date_column: 'date',
+        time_series_lags: [1, 7, 14],
+        time_series_rolling_windows: [3, 7],
+      }));
+      await refresh();
+      navigate('/model-lab');
     } catch (e) {
       setUploadError(e.message);
     } finally {
@@ -487,10 +511,23 @@ export default function Datasets() {
               <div key={s.filename} className="border border-slate-200 rounded-lg p-3 hover:border-blue-300 transition-colors">
                 <div className="font-medium text-sm text-slate-800 mb-0.5">{s.name}</div>
                 <div className="text-xs text-slate-400 mb-2">{s.columns?.length} cols · {formatSize(s.size_bytes)}</div>
-                <button onClick={() => handleLoadSample(s.filename)} disabled={!!loadingSample}
-                  className="btn-primary text-xs px-2.5 py-1 w-full justify-center">
-                  {loadingSample === s.filename ? 'Loading…' : 'Load'}
-                </button>
+                {s.filename === 'daily_sales.csv' ? (
+                  <div className="flex gap-1.5">
+                    <button onClick={() => handleLoadSample(s.filename)} disabled={!!loadingSample}
+                      className="btn-secondary text-xs px-2 py-1 flex-1 justify-center">
+                      {loadingSample === s.filename ? 'Loading…' : 'Load'}
+                    </button>
+                    <button onClick={() => handleDemoTimeSeries(s.filename)} disabled={!!loadingSample}
+                      className="btn-primary text-xs px-2 py-1 flex-1 justify-center bg-amber-600 hover:bg-amber-700 text-white">
+                      Demo
+                    </button>
+                  </div>
+                ) : (
+                  <button onClick={() => handleLoadSample(s.filename)} disabled={!!loadingSample}
+                    className="btn-primary text-xs px-2.5 py-1 w-full justify-center">
+                    {loadingSample === s.filename ? 'Loading…' : 'Load'}
+                  </button>
+                )}
               </div>
             ))}
           </div>

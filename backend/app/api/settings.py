@@ -114,11 +114,17 @@ def _check_text_images_timeseries():
     fully_available = text_ready and image_ready and time_series_ready
     note_parts = []
     if text_ready:
-        note_parts.append("Text/date preprocessing is implemented.")
-    if not image_ready:
-        note_parts.append("Image embeddings need Pillow, torch, and torchvision.")
-    if not time_series_ready:
+        note_parts.append("Text and dates are available.")
+    else:
+        note_parts.append("Text and dates are unavailable.")
+    if time_series_ready:
+        note_parts.append("Time-series forecasting is available.")
+    else:
         note_parts.append("Time-series forecasting is not accepted by the experiment API.")
+    if image_ready:
+        note_parts.append("ResNet-18 image embeddings are available.")
+    else:
+        note_parts.append("Image embeddings require Pillow and torchvision.")
     if _module_available("sentence_transformers"):
         note_parts.append("Sentence-transformers is installed for optional text embeddings.")
     return {
@@ -126,7 +132,7 @@ def _check_text_images_timeseries():
         "label": "Text, images, and time-series",
         "available": fully_available,
         "note": " ".join(note_parts),
-        "install": "Pillow torch torchvision sentence-transformers" if not image_ready else None,
+        "install": "Pillow torchvision" if not image_ready else None,
     }
 
 

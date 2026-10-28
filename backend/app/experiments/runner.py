@@ -43,6 +43,9 @@ def _update_job(job_id: str, **kwargs):
 
 def _search_space(model_id: str) -> Dict[str, list]:
     spaces = {
+        "linear_regression": {
+            "fit_intercept": [True, False],
+        },
         "logistic_regression": {
             "C": [0.1, 1.0, 10.0],
             "max_iter": [500, 1000],
@@ -131,7 +134,9 @@ def _run_tuning(model, model_id, task_type, model_config, X_train, y_train, job_
     get_scorer(scoring)
     n_iter = max(1, int(job_config.get("n_iter", 20)))
     if len(job_config.get("dataset_path", "")) and job_config.get("dataset_rows", 0) > 50_000 and len(y_train) > 20_000:
-        if task_type in ("regression", "time_series"):
+        if task_type == "time_series":
+            sample_indices = np.arange(len(y_train) - 20_000, len(y_train))
+        elif task_type == "regression":
             sample_indices = np.random.RandomState(job_config.get("random_seed", 42)).choice(
                 len(y_train), 20_000, replace=False
             )

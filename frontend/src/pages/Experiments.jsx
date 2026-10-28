@@ -155,7 +155,7 @@ export default function Experiments() {
   const completed = filtered.filter(e => e.status === 'completed');
   const primaryMetric = completed.length > 0 ? (() => {
     const task = completed[0].task_type;
-    if (task === 'regression') return 'rmse';
+    if (task === 'regression' || task === 'time_series') return 'rmse';
     if (task === 'binary_classification') return 'roc_auc';
     return 'accuracy';
   })() : null;

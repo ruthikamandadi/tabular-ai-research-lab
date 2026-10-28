@@ -140,6 +140,25 @@ def _create_sample_datasets():
         df["churn"] = (np.random.rand(n) < churn_prob).map({True: "Yes", False: "No"})
         df.to_csv(SAMPLE_DIR / "customer_churn.csv", index=False)
 
+    # Sample 5: Daily sales forecasting (time-series, ~200 rows)
+    if not (SAMPLE_DIR / "daily_sales.csv").exists():
+        n = 200
+        dates = pd.date_range("2024-01-01", periods=n, freq="D")
+        t = np.arange(n)
+        trend = 100 + 0.35 * t
+        seasonality = 14 * np.sin(2 * np.pi * t / 7)
+        promotions = np.random.choice([0, 1], n, p=[0.85, 0.15])
+        noise = np.random.normal(0, 4, n)
+        sales = np.clip(trend + seasonality + promotions * 22 + noise, 20, None).round(2)
+        visitors = np.clip((sales * 2.4 + np.random.normal(0, 8, n)), 40, None).round().astype(int)
+        df = pd.DataFrame({
+            "date": dates.strftime("%Y-%m-%d"),
+            "sales": sales,
+            "promotions": promotions,
+            "store_visitors": visitors,
+        })
+        df.to_csv(SAMPLE_DIR / "daily_sales.csv", index=False)
+
 
 @app.get("/api/health")
 def health_check():

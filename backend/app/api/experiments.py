@@ -279,6 +279,7 @@ def get_experiment_results(experiment_id: str, request: Request, db: Session = D
         "n_test_rows": record.n_test_rows,
         "train_duration_s": record.train_duration_s,
         "inference_duration_s": record.inference_duration_s,
+        "forecast_data": record.forecast_data,
     }
 
 
