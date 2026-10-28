@@ -4,7 +4,6 @@ Reports generation and export endpoints.
 import json
 import io
 import csv
-from pathlib import Path
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, HTTPException, Depends, Request

@@ -8,7 +8,7 @@ import hashlib
 import importlib.util
 import pandas as pd
 import numpy as np
-from typing import Dict, Any, List, Tuple, Optional
+from typing import Dict, Any, List, Tuple
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import (
@@ -545,9 +545,9 @@ def _image_dependencies_available():
         if importlib.util.find_spec(mod) is None:
             return False
     try:
-        import PIL
-        import torchvision
-        import torch
+        importlib.import_module("PIL")
+        importlib.import_module("torch")
+        importlib.import_module("torchvision")
         return True
     except (ImportError, ModuleNotFoundError):
         return False
@@ -561,7 +561,6 @@ def apply_pipeline_to_new_data(
 ) -> Tuple[np.ndarray, List[str]]:
     """Apply a fitted preprocessor to new inference data."""
     missing_cols = [c for c in input_feature_cols if c not in df.columns]
-    extra_cols = [c for c in df.columns if c not in input_feature_cols]
 
     if missing_cols:
         raise ValueError(f"Missing required columns: {missing_cols}")

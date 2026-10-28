@@ -2,8 +2,6 @@
 Dataset upload, management, profiling, and preview endpoints.
 """
 import uuid
-import os
-import io
 try:
     import charset_normalizer as chardet
 except ImportError:
@@ -17,17 +15,16 @@ import threading
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import List, Optional, Dict, Any
-from datetime import datetime
+from typing import Optional, Dict, Any
 
 import pandas as pd
 from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Query, Request
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db, SessionLocal, DatasetRecord
-from app.core.config import UPLOADS_DIR, SAMPLE_DIR, MAX_UPLOAD_SIZE_MB, MAX_ROWS_PREVIEW, MAX_SYNTHETIC_ROWS
+from app.core.config import UPLOADS_DIR, SAMPLE_DIR, MAX_UPLOAD_SIZE_MB, MAX_SYNTHETIC_ROWS
 from app.core.auth import request_user_id, require_authenticated_user
 from app.services.profiler import profile_dataset, suggest_task_type, get_target_distribution
 

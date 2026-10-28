@@ -10,15 +10,12 @@ import time
 import math
 import logging
 from pathlib import Path
-from typing import Optional, List
-from datetime import datetime
 
-from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks, Request
+from fastapi import APIRouter, HTTPException, Depends, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db, ExperimentRecord, DatasetRecord
-from app.core.config import ARTIFACTS_DIR, UPLOADS_DIR
 from app.core.auth import request_user_id, require_authenticated_user
 from app.core.datetime_utils import parse_datetime
 
@@ -329,7 +326,6 @@ def get_explanations(experiment_id: str, request: Request, db: Session = Depends
 
     target = df[record.target_column].head(1000)
     if record.task_type not in ("regression", "time_series"):
-        from sklearn.preprocessing import LabelEncoder
         le_path = artifact_dir / "label_encoder.pkl"
         if le_path.exists():
             le = joblib.load(str(le_path))

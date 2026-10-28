@@ -2,6 +2,7 @@
   "name": "tabular-ai-research-lab",
   "private": true,
   "scripts": {
+    "build": "npm --prefix frontend run build",
     "dev:all": "concurrently -k -n backend,frontend \"cd backend && .venv\\Scripts\\python.exe -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000\" \"wait-on -t 120000 http-get://127.0.0.1:8000/api/health && npm --prefix frontend run dev\""
   },
   "devDependencies": {

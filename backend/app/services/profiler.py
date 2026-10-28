@@ -4,7 +4,7 @@ All statistics are computed from actual data, never hard-coded.
 """
 import pandas as pd
 import numpy as np
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any
 import warnings
 from app.core.datetime_utils import parse_datetime
 
@@ -186,7 +186,7 @@ def suggest_task_type(df: pd.DataFrame, target_col: str) -> Dict[str, Any]:
         rationale = f"Target is float with {n_unique} unique values → likely regression."
     elif n_unique == 2:
         suggestion = "binary_classification"
-        rationale = f"Target has exactly 2 unique values → binary classification."
+        rationale = "Target has exactly 2 unique values → binary classification."
     elif pd.api.types.is_integer_dtype(series) or pd.api.types.is_object_dtype(series):
         if n_unique <= 20:
             suggestion = "multiclass_classification"

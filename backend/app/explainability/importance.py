@@ -3,7 +3,6 @@ Explainability: SHAP + Permutation Importance fallback.
 """
 import numpy as np
 from typing import Dict, Any, List, Optional, Callable
-from sklearn.inspection import permutation_importance
 import warnings
 
 warnings.filterwarnings("ignore")
@@ -27,11 +26,9 @@ def compute_permutation_importance(
     if task_type in ("regression", "time_series"):
         def scorer(y_true, y_pred):
             return -float(np.sqrt(mean_squared_error(y_true, y_pred)))
-        higher_is_better = False
     else:
         def scorer(y_true, y_pred):
             return float(accuracy_score(y_true, y_pred))
-        higher_is_better = True
 
     base_score = scorer(y_test, model_predict_fn(X_test))
     importances = []
@@ -117,7 +114,7 @@ def compute_shap_importance(
         result.sort(key=lambda x: x["importance"], reverse=True)
         return result
 
-    except Exception as e:
+    except Exception:
         return None  # Will trigger fallback
 
 

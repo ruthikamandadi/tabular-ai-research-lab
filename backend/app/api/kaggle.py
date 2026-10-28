@@ -12,7 +12,6 @@ import zipfile
 from pathlib import Path, PurePosixPath
 from typing import Optional
 
-import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session

@@ -274,7 +274,7 @@ def test_kaggle_connection_test_returns_clear_errors(
         def dataset_list(self, page):
             if failure == "network":
                 raise ConnectionError("network unavailable; key=saved-secret-key")
-            raise KaggleApiError(status_code, f"request failed; key=saved-secret-key")
+            raise KaggleApiError(status_code, "request failed; key=saved-secret-key")
 
     @contextmanager
     def mock_kaggle_api(credentials):
@@ -880,7 +880,6 @@ def make_demo_churn_csv():
 
 def test_e2e_demo_churn_full_workflow(unauthenticated_client, monkeypatch, tmp_path):
     import builtins
-    import os
     from types import SimpleNamespace
     from app.api import kaggle
 
@@ -1189,7 +1188,7 @@ def test_time_series_split_is_chronological():
     )
     assert prep["is_time_series"] is True
     assert prep["test_dates"] is not None
-    test_dates = pd.to_datetime(prep["test_dates"])
+    test_dates = pd.to_datetime(prep["test_dates"], format="%Y-%m-%d")
     assert test_dates.is_monotonic_increasing
     assert len(test_dates) == prep["n_test"]
     assert prep["n_train"] > prep["n_test"]
@@ -1231,7 +1230,6 @@ def test_time_series_lags_use_only_past_values():
 
 
 def test_time_series_experiment_trains_and_returns_mae_and_rmse(client):
-    import numpy as np
     import pandas as pd
 
     n = 60

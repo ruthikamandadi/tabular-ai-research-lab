@@ -1,7 +1,6 @@
 """
 Training runner - executes model training as background jobs.
 """
-import uuid
 import time
 import threading
 import traceback
@@ -9,11 +8,9 @@ import math
 import numpy as np
 import joblib
 import json
-from pathlib import Path
 from typing import Dict, Any, Optional
-from datetime import datetime
 
-from app.core.config import ARTIFACTS_DIR, UPLOADS_DIR
+from app.core.config import ARTIFACTS_DIR
 from app.core.database import SessionLocal, ExperimentRecord
 from app.preprocessing.pipeline import build_preprocessing_pipeline
 from app.models.model_factory import build_model, get_torch

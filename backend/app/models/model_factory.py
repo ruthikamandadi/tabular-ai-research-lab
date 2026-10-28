@@ -4,12 +4,9 @@ All models implement a common interface: fit, predict, predict_proba, save, load
 """
 import numpy as np
 import time
-import os
 import joblib
-import json
 import importlib.util
-from typing import Dict, Any, List, Optional, Tuple
-from pathlib import Path
+from typing import Dict, Any, List, Optional
 
 XGBOOST_AVAILABLE = importlib.util.find_spec("xgboost") is not None
 

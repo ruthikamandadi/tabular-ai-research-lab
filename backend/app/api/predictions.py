@@ -1,14 +1,12 @@
 """
 Prediction endpoints: batch CSV prediction and single-row prediction.
 """
-import uuid
 import json
 import io
 import joblib
-import numpy as np
 import pandas as pd
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import Dict, Any
 
 from fastapi import APIRouter, HTTPException, UploadFile, File, Depends, Request
 from fastapi.responses import StreamingResponse
