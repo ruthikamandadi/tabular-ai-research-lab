@@ -13,3 +13,4 @@ Capture screenshots of the following pages to document the Tabular AI Research L
 9. **`09_predictions.png`** — Interactive manual input scoring and batch CSV inference.
 10. **`10_reports.png`** — HTML and JSON report generation and comparison exports.
 11. **`11_settings.png`** — Runtime environment capabilities inspection and Kaggle API configuration.
+

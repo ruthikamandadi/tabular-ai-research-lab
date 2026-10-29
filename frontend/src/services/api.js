@@ -1,7 +1,9 @@
 import axios from 'axios';
 
+export const API_BASE = (import.meta.env.VITE_API_URL || '') + '/api';
+
 const api = axios.create({
-  baseURL: '/api',
+  baseURL: API_BASE,
   withCredentials: true,
   timeout: 120000,
 });
@@ -49,7 +51,7 @@ export const uploadDataset = (file, onProgress) => {
 
 export const listDatasets = (params) => api.get('/datasets', { params });
 export const renameDataset = (id, name) => api.patch(`/datasets/${id}`, { name });
-export const getDatasetDownloadUrl = (id) => `/api/datasets/${id}/download`;
+export const getDatasetDownloadUrl = (id) => `${API_BASE}/datasets/${id}/download`;
 export const getDatasetPreview = (id, rows = 100) => api.get(`/datasets/${id}/preview?rows=${rows}`);
 export const getDatasetProfile = (id) => api.get(`/datasets/${id}/profile`);
 export const deleteDataset = (id) => api.delete(`/datasets/${id}`);
@@ -82,9 +84,10 @@ export const predictCsv = (experimentId, file) => {
 };
 
 // ---- Reports ----
-export const getReportHtmlUrl = (id) => `/api/reports/${id}/html`;
-export const getReportJsonUrl = (id) => `/api/reports/${id}/json`;
-export const getCompareUrl = (ids) => `/api/reports/compare/csv?ids=${ids.join(',')}`;
+export const getReportHtmlUrl = (id) => `${API_BASE}/reports/${id}/html`;
+export const getReportJsonUrl = (id) => `${API_BASE}/reports/${id}/json`;
+export const getCompareUrl = (ids) => `${API_BASE}/reports/compare/csv?ids=${ids.join(',')}`;
+export const getModelDownloadUrl = (id) => `${API_BASE}/models/${id}/download`;
 
 // ---- Health ----
 export const checkHealth = () => api.get('/health');

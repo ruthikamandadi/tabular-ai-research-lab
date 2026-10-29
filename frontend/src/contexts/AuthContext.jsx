@@ -3,7 +3,9 @@ import axios from "axios";
 
 const AuthContext = createContext(null);
 
-const authApi = axios.create({ baseURL: "/api", withCredentials: true, timeout: 30000 });
+const API_BASE = (import.meta.env.VITE_API_URL || "") + "/api";
+
+const authApi = axios.create({ baseURL: API_BASE, withCredentials: true, timeout: 30000 });
 
 authApi.interceptors.response.use(
   (res) => res,
