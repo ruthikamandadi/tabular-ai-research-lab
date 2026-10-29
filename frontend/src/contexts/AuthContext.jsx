@@ -1,37 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from "react";
-import axios from "axios";
-import { getStoredToken, setStoredToken, clearStoredToken } from "../services/api";
+import { getStoredToken, setStoredToken, clearStoredToken, authApi } from "../services/api";
 
 const AuthContext = createContext(null);
-
-const API_BASE = (import.meta.env.VITE_API_URL || "") + "/api";
-
-const authApi = axios.create({ baseURL: API_BASE, withCredentials: true, timeout: 30000 });
-
-authApi.interceptors.request.use((config) => {
-  const token = getStoredToken();
-  if (token) {
-    config.headers = config.headers || {};
-    config.headers.Authorization = `Bearer ${token}`;
-  }
-  return config;
-});
-
-authApi.interceptors.response.use(
-  (res) => res,
-  (err) => {
-    const detail = err.response?.data?.detail;
-    const message =
-      typeof detail === "string"
-        ? detail
-        : Array.isArray(detail)
-        ? detail.map((d) => d?.msg || String(d)).join("; ")
-        : err.response?.data?.message || err.message;
-    const normalizedError = new Error(message || "An unexpected error occurred.");
-    normalizedError.response = err.response;
-    return Promise.reject(normalizedError);
-  }
-);
 
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(undefined);

@@ -177,7 +177,7 @@ def register(body: RegisterRequest, request: Request, response: Response, db: Se
         logger.warning("Authentication rejected: origin not allowed")
         raise HTTPException(403, "Request origin is not allowed.")
     if db.query(UserRecord).filter(UserRecord.email == body.email).first():
-        raise HTTPException(409, "An account with this email already exists.")
+        raise HTTPException(409, "This email is already registered. Please sign in.")
 
     user = UserRecord(
         id=str(uuid.uuid4()),
@@ -191,7 +191,7 @@ def register(body: RegisterRequest, request: Request, response: Response, db: Se
     except Exception:
         db.rollback()
         if db.query(UserRecord).filter(UserRecord.email == body.email).first():
-            raise HTTPException(409, "An account with this email already exists.")
+            raise HTTPException(409, "This email is already registered. Please sign in.")
         raise
     db.refresh(user)
     token = _create_session(response, user, db)

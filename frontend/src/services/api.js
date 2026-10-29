@@ -32,6 +32,22 @@ export function clearStoredToken() {
   }
 }
 
+function normalizeErrorMessage(err, responseData) {
+  const detail = responseData?.detail;
+  let message = typeof detail === 'string'
+    ? detail
+    : Array.isArray(detail)
+      ? detail.map(item => item?.msg || String(item)).join('; ')
+      : responseData?.message || err?.message;
+
+  if (err?.code === 'ECONNABORTED' || (message && message.toLowerCase().includes('timeout'))) {
+    message = 'Server request timed out. Please try again.';
+  } else if (err?.code === 'ERR_NETWORK' || message === 'Network Error') {
+    message = 'Server is starting, please wait...';
+  }
+  return message || 'An unexpected error occurred.';
+}
+
 const api = axios.create({
   baseURL: API_BASE,
   withCredentials: true,
@@ -58,14 +74,10 @@ api.interceptors.response.use(
         responseData = null;
       }
     }
-    const detail = responseData?.detail;
-    const message = typeof detail === 'string'
-      ? detail
-      : Array.isArray(detail)
-        ? detail.map(item => item?.msg || String(item)).join('; ')
-        : responseData?.message || err.message;
-    const normalizedError = new Error(message || 'An unexpected error occurred.');
+    const message = normalizeErrorMessage(err, responseData);
+    const normalizedError = new Error(message);
     normalizedError.response = err.response ? { ...err.response, data: responseData } : undefined;
+    normalizedError.code = err.code;
     if (err.response?.status === 401) {
       const url = err.config?.url || '';
       if (!url.includes('/auth/login') && !url.includes('/auth/register')) {
@@ -75,6 +87,46 @@ api.interceptors.response.use(
     return Promise.reject(normalizedError);
   }
 );
+
+// ---- Authentication (120s timeout for cold start) ----
+export const authApi = axios.create({
+  baseURL: API_BASE,
+  withCredentials: true,
+  timeout: 120000,
+});
+
+authApi.interceptors.request.use((config) => {
+  const token = getStoredToken();
+  if (token) {
+    config.headers = config.headers || {};
+    config.headers.Authorization = `Bearer ${token}`;
+  }
+  return config;
+});
+
+authApi.interceptors.response.use(
+  (res) => res,
+  (err) => {
+    let responseData = err.response?.data;
+    const message = normalizeErrorMessage(err, responseData);
+    const normalizedError = new Error(message);
+    normalizedError.response = err.response ? { ...err.response, data: responseData } : undefined;
+    normalizedError.code = err.code;
+    return Promise.reject(normalizedError);
+  }
+);
+
+export const authLogin = (email, password) =>
+  authApi.post('/auth/login', { email, password }, { timeout: 120000 });
+
+export const authRegister = (payload) =>
+  authApi.post('/auth/register', payload, { timeout: 120000 });
+
+export const authMe = () =>
+  authApi.get('/auth/me', { timeout: 120000 });
+
+export const authLogout = () =>
+  authApi.post('/auth/logout', {}, { timeout: 120000 });
 
 // ---- Datasets ----
 export const uploadDataset = (file, onProgress) => {
@@ -148,7 +200,7 @@ export const getModelDownloadUrl = (id) => {
 };
 
 // ---- Health ----
-export const checkHealth = () => api.get('/health');
+export const checkHealth = () => api.get('/health', { timeout: 120000 });
 export const getCapabilities = (refresh = false) =>
   api.get(`/settings/capabilities${refresh ? '?refresh=true' : ''}`);
 export const saveKaggleCredentials = (credentials) => api.post('/settings/kaggle', credentials);

@@ -1437,3 +1437,34 @@ def test_bearer_token_authentication_lifecycle(unauthenticated_client):
         )
         assert post_logout_res.status_code == 401
 
+
+def test_repeated_registration_returns_clear_message(unauthenticated_client):
+    email = "repeat_user@example.com"
+    password = "RepeatPassword123!"
+
+    # First registration succeeds
+    reg_1 = unauthenticated_client.post(
+        "/api/auth/register",
+        json={
+            "name": "Repeat User",
+            "email": email,
+            "password": password,
+            "confirm_password": password,
+        },
+    )
+    assert reg_1.status_code == 201
+
+    # Repeated registration returns clear message
+    reg_2 = unauthenticated_client.post(
+        "/api/auth/register",
+        json={
+            "name": "Repeat User",
+            "email": email,
+            "password": password,
+            "confirm_password": password,
+        },
+    )
+    assert reg_2.status_code == 409
+    assert reg_2.json()["detail"] == "This email is already registered. Please sign in."
+
+
