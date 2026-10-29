@@ -2,10 +2,49 @@ import axios from 'axios';
 
 export const API_BASE = (import.meta.env.VITE_API_URL || '') + '/api';
 
+const TOKEN_KEY = 'tabular_session_token';
+
+export function getStoredToken() {
+  try {
+    return localStorage.getItem(TOKEN_KEY);
+  } catch {
+    return null;
+  }
+}
+
+export function setStoredToken(token) {
+  try {
+    if (token) {
+      localStorage.setItem(TOKEN_KEY, token);
+    } else {
+      localStorage.removeItem(TOKEN_KEY);
+    }
+  } catch {
+    // ignore storage exceptions
+  }
+}
+
+export function clearStoredToken() {
+  try {
+    localStorage.removeItem(TOKEN_KEY);
+  } catch {
+    // ignore
+  }
+}
+
 const api = axios.create({
   baseURL: API_BASE,
   withCredentials: true,
   timeout: 120000,
+});
+
+api.interceptors.request.use((config) => {
+  const token = getStoredToken();
+  if (token) {
+    config.headers = config.headers || {};
+    config.headers.Authorization = `Bearer ${token}`;
+  }
+  return config;
 });
 
 api.interceptors.response.use(
@@ -28,7 +67,10 @@ api.interceptors.response.use(
     const normalizedError = new Error(message || 'An unexpected error occurred.');
     normalizedError.response = err.response ? { ...err.response, data: responseData } : undefined;
     if (err.response?.status === 401) {
-      window.dispatchEvent(new CustomEvent('auth:unauthorized'));
+      const url = err.config?.url || '';
+      if (!url.includes('/auth/login') && !url.includes('/auth/register')) {
+        window.dispatchEvent(new CustomEvent('auth:unauthorized'));
+      }
     }
     return Promise.reject(normalizedError);
   }
@@ -51,7 +93,10 @@ export const uploadDataset = (file, onProgress) => {
 
 export const listDatasets = (params) => api.get('/datasets', { params });
 export const renameDataset = (id, name) => api.patch(`/datasets/${id}`, { name });
-export const getDatasetDownloadUrl = (id) => `${API_BASE}/datasets/${id}/download`;
+export const getDatasetDownloadUrl = (id) => {
+  const token = getStoredToken();
+  return `${API_BASE}/datasets/${id}/download${token ? `?token=${encodeURIComponent(token)}` : ''}`;
+};
 export const getDatasetPreview = (id, rows = 100) => api.get(`/datasets/${id}/preview?rows=${rows}`);
 export const getDatasetProfile = (id) => api.get(`/datasets/${id}/profile`);
 export const deleteDataset = (id) => api.delete(`/datasets/${id}`);
@@ -84,10 +129,23 @@ export const predictCsv = (experimentId, file) => {
 };
 
 // ---- Reports ----
-export const getReportHtmlUrl = (id) => `${API_BASE}/reports/${id}/html`;
-export const getReportJsonUrl = (id) => `${API_BASE}/reports/${id}/json`;
-export const getCompareUrl = (ids) => `${API_BASE}/reports/compare/csv?ids=${ids.join(',')}`;
-export const getModelDownloadUrl = (id) => `${API_BASE}/models/${id}/download`;
+export const getReportHtmlUrl = (id) => {
+  const token = getStoredToken();
+  return `${API_BASE}/reports/${id}/html${token ? `?token=${encodeURIComponent(token)}` : ''}`;
+};
+export const getReportJsonUrl = (id) => {
+  const token = getStoredToken();
+  return `${API_BASE}/reports/${id}/json${token ? `?token=${encodeURIComponent(token)}` : ''}`;
+};
+export const getCompareUrl = (ids) => {
+  const token = getStoredToken();
+  const tokenPart = token ? `&token=${encodeURIComponent(token)}` : '';
+  return `${API_BASE}/reports/compare/csv?ids=${ids.join(',')}${tokenPart}`;
+};
+export const getModelDownloadUrl = (id) => {
+  const token = getStoredToken();
+  return `${API_BASE}/models/${id}/download${token ? `?token=${encodeURIComponent(token)}` : ''}`;
+};
 
 // ---- Health ----
 export const checkHealth = () => api.get('/health');
@@ -100,3 +158,4 @@ export const importKaggleDataset = (payload) => api.post('/kaggle/import', paylo
 export const getSynthesisMethods = () => api.get('/datasets/synthesis/methods');
 export const synthesizeDataset = (datasetId, payload) => api.post(`/datasets/${datasetId}/synthesize`, payload);
 export const getSynthesisStatus = (jobId) => api.get(`/datasets/synthesis/${jobId}/status`);
+export default api;

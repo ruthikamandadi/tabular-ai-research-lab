@@ -1,6 +1,8 @@
-"""Cookie-based account authentication and authorization dependencies."""
+"""Cookie- and bearer token-based account authentication and authorization dependencies."""
 import hashlib
 import hmac
+import logging
+import os
 import re
 import secrets
 import threading
@@ -14,6 +16,8 @@ from sqlalchemy.orm import Session
 
 from app.core.config import FRONTEND_ORIGINS
 from app.core.database import AuthSessionRecord, UserRecord, get_db
+
+logger = logging.getLogger("app.auth")
 
 router = APIRouter(prefix="/api/auth", tags=["authentication"])
 SESSION_COOKIE = "tabular_session"
@@ -78,12 +82,25 @@ def _verify_password(password: str, password_hash: str) -> bool:
     return hmac.compare_digest(actual, expected)
 
 
+def _get_allowed_origins() -> set[str]:
+    cors_env = os.getenv("CORS_ORIGINS")
+    raw = cors_env.split(",") if cors_env else FRONTEND_ORIGINS
+    origins = set()
+    for item in raw:
+        cleaned = item.strip().rstrip("/")
+        if cleaned:
+            origins.add(cleaned)
+    return origins
+
+
 def _request_origin_allowed(request: Request) -> bool:
     origin = request.headers.get("origin")
     if not origin:
         return True
     normalized_origin = origin.rstrip("/")
-    return normalized_origin in {item.rstrip("/") for item in FRONTEND_ORIGINS} or normalized_origin == str(request.base_url).rstrip("/")
+    allowed = _get_allowed_origins()
+    base = str(request.base_url).rstrip("/")
+    return normalized_origin in allowed or normalized_origin == base
 
 
 def _client_keys(request: Request, email: str):
@@ -129,7 +146,7 @@ def _user_payload(user: UserRecord):
     }
 
 
-def _create_session(response: Response, user: UserRecord, db: Session):
+def _create_session(response: Response, user: UserRecord, db: Session) -> str:
     raw_token = secrets.token_urlsafe(48)
     expires_at = datetime.now(UTC) + SESSION_DURATION
     db.add(AuthSessionRecord(
@@ -150,12 +167,14 @@ def _create_session(response: Response, user: UserRecord, db: Session):
         samesite="lax",
         path="/",
     )
+    return raw_token
 
 
 @router.post("/register", status_code=201)
 def register(body: RegisterRequest, request: Request, response: Response, db: Session = Depends(get_db)):
     body.validate_password_confirmation()
     if not _request_origin_allowed(request):
+        logger.warning("Authentication rejected: origin not allowed")
         raise HTTPException(403, "Request origin is not allowed.")
     if db.query(UserRecord).filter(UserRecord.email == body.email).first():
         raise HTTPException(409, "An account with this email already exists.")
@@ -175,13 +194,14 @@ def register(body: RegisterRequest, request: Request, response: Response, db: Se
             raise HTTPException(409, "An account with this email already exists.")
         raise
     db.refresh(user)
-    _create_session(response, user, db)
-    return {"user": _user_payload(user)}
+    token = _create_session(response, user, db)
+    return {"user": _user_payload(user), "token": token}
 
 
 @router.post("/login")
 def login(body: LoginRequest, request: Request, response: Response, db: Session = Depends(get_db)):
     if not _request_origin_allowed(request):
+        logger.warning("Authentication rejected: origin not allowed")
         raise HTTPException(403, "Request origin is not allowed.")
     _check_login_rate_limit(request, body.email)
     user = db.query(UserRecord).filter(UserRecord.email == body.email).first()
@@ -189,27 +209,65 @@ def login(body: LoginRequest, request: Request, response: Response, db: Session 
     _record_login_result(request, body.email, valid)
     if not valid:
         raise HTTPException(401, "Email or password is incorrect.")
-    _create_session(response, user, db)
-    return {"user": _user_payload(user)}
+    token = _create_session(response, user, db)
+    return {"user": _user_payload(user), "token": token}
+
+
+def _extract_token(request: Request) -> str | None:
+    # 1. Authorization: Bearer <token>
+    auth_header = request.headers.get("authorization") or request.headers.get("Authorization")
+    if auth_header:
+        parts = auth_header.strip().split(" ", 1)
+        if len(parts) == 2 and parts[0].lower() == "bearer":
+            token = parts[1].strip()
+            if token:
+                return token
+    # 2. Query parameter ?token= (for direct browser file downloads / HTML report links)
+    query_token = request.query_params.get("token")
+    if query_token:
+        token = query_token.strip()
+        if token:
+            return token
+    # 3. Session cookie (for backwards compatibility with local development)
+    cookie_token = request.cookies.get(SESSION_COOKIE)
+    if cookie_token:
+        return cookie_token.strip()
+    return None
 
 
 def require_authenticated_user(request: Request, db: Session = Depends(get_db)):
     if request.method not in {"GET", "HEAD", "OPTIONS"} and not _request_origin_allowed(request):
+        logger.warning("Authentication rejected: origin not allowed")
         raise HTTPException(403, "Request origin is not allowed.")
-    raw_token = request.cookies.get(SESSION_COOKIE)
+
+    raw_token = _extract_token(request)
     if not raw_token:
+        logger.warning("Authentication rejected: no token")
         raise HTTPException(401, "Authentication required.")
+
     token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
     session = db.query(AuthSessionRecord).filter(
         AuthSessionRecord.token_hash == token_hash,
-        AuthSessionRecord.expires_at > datetime.now(UTC),
     ).first()
+
     if not session:
+        logger.warning("Authentication rejected: token unknown")
         raise HTTPException(401, "Session expired. Please sign in again.")
+
+    expires_at = session.expires_at
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=UTC)
+    if expires_at <= datetime.now(UTC):
+        logger.warning("Authentication rejected: token expired")
+        raise HTTPException(401, "Session expired. Please sign in again.")
+
     user = db.query(UserRecord).filter(UserRecord.id == session.user_id).first()
     if not user:
+        logger.warning("Authentication rejected: user not found")
         raise HTTPException(401, "Authentication required.")
+
     request.state.user = user
+    request.state.raw_token = raw_token
     return user
 
 
@@ -232,7 +290,7 @@ def logout(
     db: Session = Depends(get_db),
     user: UserRecord = Depends(require_authenticated_user),
 ):
-    raw_token = request.cookies.get(SESSION_COOKIE)
+    raw_token = getattr(request.state, "raw_token", None) or _extract_token(request)
     if raw_token:
         token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
         db.query(AuthSessionRecord).filter(

@@ -1365,3 +1365,75 @@ def test_capabilities_reports_real_availability(client):
     assert "Time-series forecasting is available." in item["note"]
     assert "ResNet-18 image embeddings are available." in item["note"]
     assert "is not accepted by the experiment API" not in item["note"]
+
+
+def test_bearer_token_authentication_lifecycle(unauthenticated_client):
+    from fastapi.testclient import TestClient
+    from app.main import app
+
+    email = "bearer_user@example.com"
+    password = "StrongBearerPassword123!"
+
+    # 1. Register returns a session token in the JSON body
+    reg_res = unauthenticated_client.post(
+        "/api/auth/register",
+        json={
+            "name": "Bearer Test User",
+            "email": email,
+            "password": password,
+            "confirm_password": password,
+        },
+    )
+    assert reg_res.status_code == 201, reg_res.text
+    reg_data = reg_res.json()
+    assert "token" in reg_data
+    assert isinstance(reg_data["token"], str) and len(reg_data["token"]) > 20
+    assert reg_data["user"]["email"] == email
+
+    # 2. Login returns a session token in the JSON body
+    login_res = unauthenticated_client.post(
+        "/api/auth/login",
+        json={"email": email, "password": password},
+    )
+    assert login_res.status_code == 200, login_res.text
+    login_data = login_res.json()
+    assert "token" in login_data
+    token = login_data["token"]
+    assert isinstance(token, str) and len(token) > 20
+
+    # 3. Create a fresh client with NO cookies to simulate cross-site request
+    with TestClient(app, cookies={}) as cross_site_client:
+        # Request WITHOUT Bearer header returns 401
+        no_header_res = cross_site_client.get("/api/auth/me")
+        assert no_header_res.status_code == 401
+        assert "Authentication required" in no_header_res.text
+
+        # Request WITH Bearer header returns 200
+        bearer_res = cross_site_client.get(
+            "/api/auth/me",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert bearer_res.status_code == 200, bearer_res.text
+        assert bearer_res.json()["user"]["email"] == email
+
+        # Another protected endpoint with Bearer header returns 200
+        datasets_res = cross_site_client.get(
+            "/api/datasets",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert datasets_res.status_code == 200, datasets_res.text
+
+        # 4. Logout invalidates the token
+        logout_res = cross_site_client.post(
+            "/api/auth/logout",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert logout_res.status_code == 200
+
+        # Subsequent request with the logged-out token returns 401
+        post_logout_res = cross_site_client.get(
+            "/api/auth/me",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert post_logout_res.status_code == 401
+
