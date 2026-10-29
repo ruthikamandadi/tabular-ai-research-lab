@@ -23,6 +23,13 @@ def compute_permutation_importance(
     """
     from sklearn.metrics import accuracy_score, mean_squared_error
 
+    # Subsample to at most 200 rows for memory and speed
+    if len(X_test) > 200:
+        rng = np.random.RandomState(random_state)
+        sample_idx = rng.choice(len(X_test), 200, replace=False)
+        X_test = X_test[sample_idx]
+        y_test = y_test[sample_idx]
+
     if task_type in ("regression", "time_series"):
         def scorer(y_true, y_pred):
             return -float(np.sqrt(mean_squared_error(y_true, y_pred)))

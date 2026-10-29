@@ -17,14 +17,15 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional, Dict, Any
 
+import io
 import pandas as pd
-from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Query, Request
+from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Query, Request, Response
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from app.core.database import get_db, SessionLocal, DatasetRecord
-from app.core.config import UPLOADS_DIR, SAMPLE_DIR, MAX_UPLOAD_SIZE_MB, MAX_SYNTHETIC_ROWS
+from app.core.database import get_db, SessionLocal, DatasetRecord, enforce_user_quota
+from app.core.config import UPLOADS_DIR, SAMPLE_DIR, MAX_UPLOAD_MB, MAX_SYNTHETIC_ROWS, LIGHT_MODE
 from app.core.auth import request_user_id, require_authenticated_user
 from app.services.profiler import profile_dataset, suggest_task_type, get_target_distribution
 
@@ -72,6 +73,19 @@ def _load_csv_safe(filepath: str) -> pd.DataFrame:
     raise ValueError("Could not read CSV with supported encodings.")
 
 
+def _get_dataframe_for_record(record: DatasetRecord) -> pd.DataFrame:
+    """Load DataFrame for record, restoring file from DB file_content if missing on disk."""
+    dest = Path(record.filepath)
+    if (not dest.exists() or dest.stat().st_size == 0) and record.file_content:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(record.file_content)
+    if dest.exists():
+        return _load_csv_safe(str(dest))
+    if record.file_content:
+        return pd.read_csv(io.BytesIO(record.file_content), low_memory=False)
+    raise HTTPException(404, "Dataset file could not be found.")
+
+
 @router.post("/upload")
 async def upload_dataset(request: Request, file: UploadFile = File(...), db: Session = Depends(get_db)):
     # Validate extension
@@ -80,8 +94,10 @@ async def upload_dataset(request: Request, file: UploadFile = File(...), db: Ses
 
     content = await file.read()
     size_mb = len(content) / (1024 * 1024)
-    if size_mb > MAX_UPLOAD_SIZE_MB:
-        raise HTTPException(413, f"File exceeds {MAX_UPLOAD_SIZE_MB}MB limit.")
+    if size_mb > MAX_UPLOAD_MB:
+        raise HTTPException(413, f"File exceeds {MAX_UPLOAD_MB}MB limit.")
+
+    enforce_user_quota(request_user_id(request), db, incoming_bytes=len(content))
 
     dataset_id = str(uuid.uuid4())
     safe_name = _safe_filename(Path(file.filename).stem) + ".csv"
@@ -106,6 +122,7 @@ async def upload_dataset(request: Request, file: UploadFile = File(...), db: Ses
         name=Path(file.filename).stem,
         filename=file.filename,
         filepath=str(dest_path),
+        file_content=content,
         size_bytes=len(content),
         row_count=len(df),
         col_count=len(df.columns),
@@ -175,6 +192,13 @@ def _optional_method_availability():
     }
     methods = [{"method": "bootstrap", "available": True, "install": None}]
     for method, (module_name, package_name) in checks.items():
+        if LIGHT_MODE and method == "ctgan":
+            methods.append({
+                "method": method,
+                "available": False,
+                "install": "Not available in light mode.",
+            })
+            continue
         try:
             available = importlib.util.find_spec(module_name) is not None
         except Exception:
@@ -386,14 +410,17 @@ def _run_synthesis(job_id: str, dataset_path: str, original_name: str, request: 
         filename = f"{dataset_id}_{_safe_filename(original_name)}_synthetic.csv"
         output_path = UPLOADS_DIR / filename
         synthetic.to_csv(output_path, index=False)
+        output_bytes = output_path.read_bytes()
         db = SessionLocal()
+        enforce_user_quota(owner_id, db, incoming_bytes=len(output_bytes))
         record = DatasetRecord(
             id=dataset_id,
             owner_id=owner_id,
             name=f"{original_name}_synthetic",
             filename=filename,
             filepath=str(output_path),
-            size_bytes=output_path.stat().st_size,
+            file_content=output_bytes,
+            size_bytes=len(output_bytes),
             row_count=len(synthetic),
             col_count=len(synthetic.columns),
             columns=synthetic.columns.tolist(),
@@ -439,6 +466,8 @@ def synthesize_dataset(dataset_id: str, body: SynthesisRequest, request: Request
     allowed_methods = {"bootstrap", "smote", "gaussian_copula", "ctgan"}
     if body.method not in allowed_methods:
         raise HTTPException(400, f"method must be one of: {', '.join(sorted(allowed_methods))}.")
+    if LIGHT_MODE and body.method == "ctgan":
+        raise HTTPException(400, "CTGAN is not available in light mode.")
     if body.method in {"gaussian_copula", "ctgan"} and importlib.util.find_spec("sdv") is None:
         raise HTTPException(400, f"{body.method} requires SDV. Install it with: pip install sdv")
     if body.method == "smote" and importlib.util.find_spec("imblearn") is None:
@@ -483,7 +512,7 @@ def preview_dataset(dataset_id: str, request: Request, rows: int = Query(100, le
     if not record:
         raise HTTPException(404, "Dataset not found.")
 
-    df = _load_csv_safe(record.filepath)
+    df = _get_dataframe_for_record(record)
     preview_df = df.head(rows)
     preview_df = preview_df.where(pd.notnull(preview_df), None)
 
@@ -505,7 +534,7 @@ def profile_dataset_endpoint(dataset_id: str, request: Request, db: Session = De
     if not record:
         raise HTTPException(404, "Dataset not found.")
 
-    df = _load_csv_safe(record.filepath)
+    df = _get_dataframe_for_record(record)
     profile = profile_dataset(df)
     profile["dataset_id"] = dataset_id
     profile["dataset_name"] = record.name
@@ -525,7 +554,7 @@ def suggest_task(dataset_id: str, body: dict, request: Request, db: Session = De
     if not record:
         raise HTTPException(404, "Dataset not found.")
 
-    df = _load_csv_safe(record.filepath)
+    df = _get_dataframe_for_record(record)
     if target_col not in df.columns:
         raise HTTPException(400, f"Column '{target_col}' not found in dataset.")
 
@@ -562,7 +591,7 @@ def target_distribution(dataset_id: str, request: Request, target_column: str, t
     ).first()
     if not record:
         raise HTTPException(404, "Dataset not found.")
-    df = _load_csv_safe(record.filepath)
+    df = _get_dataframe_for_record(record)
     _validate_target(df, target_column, task_type)
 
     dist = get_target_distribution(df, target_column, task_type)
@@ -632,11 +661,18 @@ def download_dataset(dataset_id: str, request: Request, db: Session = Depends(ge
     if not record:
         raise HTTPException(404, "Dataset not found.")
 
+    download_name = record.name if record.name.lower().endswith(".csv") else f"{record.name}.csv"
+    if record.file_content:
+        return Response(
+            content=record.file_content,
+            media_type="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="{download_name}"'},
+        )
+
     file_path = Path(record.filepath)
     if not file_path.exists():
-        raise HTTPException(404, "Dataset file not found on disk.")
+        raise HTTPException(404, "Dataset file not found.")
 
-    download_name = record.name if record.name.lower().endswith(".csv") else f"{record.name}.csv"
     return FileResponse(
         path=str(file_path),
         filename=download_name,
@@ -673,6 +709,7 @@ async def load_sample_dataset(filename: str, request: Request, db: Session = Dep
         raise HTTPException(404, f"Sample file '{filename}' not found.")
 
     content = sample_path.read_bytes()
+    enforce_user_quota(request_user_id(request), db, incoming_bytes=len(content))
 
     dataset_id = str(uuid.uuid4())
     dest_path = UPLOADS_DIR / f"{dataset_id}_{safe_fn}"
@@ -690,6 +727,7 @@ async def load_sample_dataset(filename: str, request: Request, db: Session = Dep
         name=Path(filename).stem.replace("_", " ").title(),
         filename=filename,
         filepath=str(dest_path),
+        file_content=content,
         size_bytes=len(content),
         row_count=len(df),
         col_count=len(df.columns),

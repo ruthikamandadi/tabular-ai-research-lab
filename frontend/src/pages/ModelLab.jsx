@@ -15,15 +15,22 @@ const TASK_LABELS = {
 
 function ModelCard({ model, taskType, selected, onSelect, onConfigChange, config }) {
   const [expanded, setExpanded] = useState(false);
+  const disabledInLightMode = Boolean(model.disabled);
   const compatible = taskType ? model.tasks.includes(taskType) : true;
+  const isSelectable = compatible && !disabledInLightMode;
 
   return (
-    <div className={`border rounded-xl p-4 transition-all ${selected ? 'border-blue-400 bg-blue-50/30 shadow-card-md' : compatible ? 'border-slate-200 hover:border-slate-300' : 'border-slate-100 opacity-50'}`}>
+    <div className={`border rounded-xl p-4 transition-all ${selected ? 'border-blue-400 bg-blue-50/30 shadow-card-md' : isSelectable ? 'border-slate-200 hover:border-slate-300' : 'border-slate-100 opacity-60 bg-slate-50'}`}>
       <div className="flex items-start gap-3">
-        <input type="checkbox" checked={selected} onChange={() => compatible && onSelect(model.id)}
-          disabled={!compatible} className="mt-0.5 cursor-pointer" id={`model-${model.id}`} />
-        <label htmlFor={`model-${model.id}`} className={`flex-1 ${compatible ? 'cursor-pointer' : 'cursor-not-allowed'}`}>
-          <div className="font-semibold text-sm text-slate-800">{model.name}</div>
+        <input type="checkbox" checked={selected} onChange={() => isSelectable && onSelect(model.id)}
+          disabled={!isSelectable} className="mt-0.5 cursor-pointer disabled:cursor-not-allowed" id={`model-${model.id}`} />
+        <label htmlFor={`model-${model.id}`} className={`flex-1 ${isSelectable ? 'cursor-pointer' : 'cursor-not-allowed'}`}>
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="font-semibold text-sm text-slate-800">{model.name}</span>
+            {disabledInLightMode && (
+              <span className="badge badge-yellow text-[10px]">Not available in light mode</span>
+            )}
+          </div>
           {model.device && <span className="badge badge-gray mt-1">{model.device}</span>}
           <div className="text-xs text-slate-500 mt-0.5">{model.description}</div>
           <div className="flex flex-wrap gap-1 mt-2">
@@ -199,7 +206,17 @@ function TrainingStatus({ job, experimentId }) {
         </button>
       )}
 
-      {status === 'failed' && (
+      {status === 'failed: server restarted' || (typeof message === 'string' && message.includes('Training was interrupted')) || (typeof jobError === 'string' && jobError.includes('Training was interrupted')) ? (
+        <div className="mt-3 rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900">
+          <div className="flex items-start gap-2">
+            <AlertCircle size={15} className="mt-0.5 shrink-0 text-amber-600" />
+            <div>
+              <div className="font-semibold text-amber-900">Training Interrupted</div>
+              <div className="mt-0.5 text-amber-800">Training was interrupted. Please try again with fewer rows.</div>
+            </div>
+          </div>
+        </div>
+      ) : status === 'failed' && (
         <div className="error-box mt-3 text-xs">
           <AlertCircle size={14} className="shrink-0" />
           <div>
@@ -277,7 +294,7 @@ export default function ModelLab() {
         // Clear status refresh error if polling succeeded
         setError(prev => (prev && prev.includes('Could not refresh training status') ? null : prev));
 
-        if (['completed', 'failed', 'cancelled'].includes(job.status)) {
+        if (['completed', 'failed', 'cancelled', 'failed: server restarted'].includes(job.status)) {
           if (pollingRef.current[expId]) {
             clearInterval(pollingRef.current[expId]);
             delete pollingRef.current[expId];
@@ -289,7 +306,8 @@ export default function ModelLab() {
         const retries = (retryCountsRef.current[expId] || 0) + 1;
         retryCountsRef.current[expId] = retries;
 
-        const maxRetries = 5;
+        // Retry for up to 2 minutes (24 attempts every 5 seconds)
+        const maxRetries = 24;
         if (retries >= maxRetries) {
           if (pollingRef.current[expId]) {
             clearInterval(pollingRef.current[expId]);
@@ -297,15 +315,24 @@ export default function ModelLab() {
           }
           const detail = err.response?.data?.detail || err.message;
           setError(`Could not refresh training status: ${detail}`);
+        } else {
+          setJobs(prev => {
+            const current = prev[expId];
+            if (!current) return prev;
+            return {
+              ...current,
+              message: 'Reconnecting to the server...',
+            };
+          });
         }
       } finally {
         inFlightRef.current.delete(expId);
       }
     };
 
-    // Immediate first check, then recurring interval
+    // Immediate first check, then recurring interval every 5 seconds
     checkStatus();
-    pollingRef.current[expId] = setInterval(checkStatus, 1500);
+    pollingRef.current[expId] = setInterval(checkStatus, 5000);
   };
 
   const handleTrain = async () => {

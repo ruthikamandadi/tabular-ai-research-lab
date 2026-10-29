@@ -50,10 +50,10 @@ An end-to-end, local-first research platform for exploring tabular datasets, con
 | Layer | Technologies |
 | :--- | :--- |
 | **Frontend** | React 19, Vite, React Router 7, Tailwind CSS, Recharts, Lucide Icons, Axios |
-| **Backend API** | Python 3.11+, FastAPI, Uvicorn, Pydantic v2, SQLAlchemy, SQLite |
+| **Backend API** | Python 3.11+, FastAPI, Uvicorn, Pydantic v2, SQLAlchemy, psycopg 3 |
 | **Machine Learning** | scikit-learn, NumPy, pandas, PyTorch, Torchvision, Pillow, XGBoost, SHAP |
 | **Optional Extras** | `pytorch-tabnet`, `rtdl-revisiting-models`, `sentence-transformers`, `sdv`, `optuna` |
-| **Storage** | SQLite (`data/tabular_lab.db`), local filesystem artifact store (`backend/storage/`) |
+| **Storage & Database** | PostgreSQL (Neon serverless with SSL) or SQLite (`data/tabular_lab.db`) + in-database binary persistence |
 
 ---
 
@@ -195,6 +195,36 @@ To search and download Kaggle datasets directly from the **Datasets** page:
 5. Choose one of two ways to configure credentials:
    - **Via the UI (Recommended)**: Open **Settings** in the application, paste your username and API key into the **Kaggle API Credentials** card, and click **Save Credentials** followed by **Test Connection**.
    - **Via File/Environment**: Copy `kaggle.json` directly into `backend/storage/kaggle.json`, or set `KAGGLE_USERNAME` and `KAGGLE_KEY` in your `.env` file.
+
+---
+
+## Production Deployment & Neon PostgreSQL Setup
+
+When deployed to cloud platforms with ephemeral containers (such as Render or Railway) and static hosts (such as Vercel), the application supports managed PostgreSQL (e.g. Neon) and Light Mode to guarantee zero data loss and prevent out-of-memory crashes on free tiers:
+
+### 1. Neon PostgreSQL Persistence
+1. Create a free PostgreSQL database on [Neon](https://neon.tech).
+2. Copy the connection string (pooled connection with `sslmode=require`), e.g.:
+   `postgresql://username:password@ep-xyz-pooler.us-east-2.aws.neon.tech/neondb?sslmode=require`
+3. Set the `DATABASE_URL` environment variable in your backend hosting service (e.g. Render dashboard).
+4. When `DATABASE_URL` is set:
+   - All users, sessions (7-day bearer tokens), dataset records, and experiments are persisted in PostgreSQL.
+   - Dataset files and trained model artifacts (`.pkl` / `.pt` and preprocessor pipelines) are automatically stored as binary blobs inside the database, surviving ephemeral disk restarts.
+   - If ephemeral disk storage is wiped, any prediction or explanation request automatically reconstructs model artifacts on demand.
+
+### 2. Light Mode & Memory Protection (512 MB Free Tiers)
+When running on memory-constrained servers (512 MB RAM), set `LIGHT_MODE=true` (automatically enabled on Render):
+- **Single-Job Execution Queue**: Training jobs execute sequentially via a thread semaphore, preventing concurrent memory spikes.
+- **Row Safety Cap**: Limits training to `MAX_TRAIN_ROWS` (default: 20,000) using stratified or chronological sampling.
+- **Model Constraints**: Classical models run with `n_jobs=1` and depth limits (`max_depth=12`, `n_estimators <= 100`). KNN is skipped on >10,000 rows.
+- **Lightweight Explainability**: SHAP and permutation importance are evaluated on at most 200 rows.
+- **Automatic Garbage Collection**: Explicit memory cleanup and `gc.collect()` after each training run.
+- **Deep Model Guardrails**: Heavy deep models (TabNet, FT-Transformer, CTGAN) are disabled in Light Mode.
+- **Storage Quota**: Enforces a 300 MB total storage ceiling per user, automatically evicting oldest experiments and datasets when exceeded.
+
+### 3. Server Wake-up & Restart Safety
+- **Cold-Start Resilience**: The frontend tolerates Render free-tier sleep cycles (~60s wake-up) without logging users out on network errors or 502/503/504 responses.
+- **Interrupted Job Recovery**: If a server dies mid-training, jobs left in `"running"` or `"pending"` status are automatically updated on startup to `"failed: server restarted"`, guiding the user with: `"Training was interrupted. Please try again with fewer rows."`.
 
 ---
 

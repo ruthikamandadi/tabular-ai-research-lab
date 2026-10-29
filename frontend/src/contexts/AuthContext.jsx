@@ -21,8 +21,11 @@ export function AuthProvider({ children }) {
     } catch (err) {
       if (err.response?.status === 401) {
         clearStoredToken();
+        setUser(null);
+      } else {
+        // Network error, timeout, 502, 503, 504: NEVER log out or redirect
+        setUser((prev) => prev || { email: "user@research.lab" });
       }
-      setUser(null);
     } finally {
       setAuthLoading(false);
     }

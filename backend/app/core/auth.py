@@ -21,7 +21,7 @@ logger = logging.getLogger("app.auth")
 
 router = APIRouter(prefix="/api/auth", tags=["authentication"])
 SESSION_COOKIE = "tabular_session"
-SESSION_DURATION = timedelta(days=30)
+SESSION_DURATION = timedelta(days=7)
 LOGIN_WINDOW_SECONDS = 15 * 60
 LOGIN_MAX_ATTEMPTS = 5
 _LOGIN_FAILURES = {}

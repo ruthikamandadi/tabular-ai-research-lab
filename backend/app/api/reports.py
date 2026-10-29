@@ -123,7 +123,13 @@ def get_html_report(experiment_id: str, request: Request, db: Session = Depends(
     if record.status != "completed":
         raise HTTPException(400, "Experiment has not completed.")
 
-    html = _build_html_report(record)
+    if record.report_html:
+        html = record.report_html
+    else:
+        html = _build_html_report(record)
+        record.report_html = html
+        db.commit()
+
     return HTMLResponse(content=html, headers={
         "Content-Disposition": f"attachment; filename=report_{experiment_id[:8]}.html"
     })
@@ -138,7 +144,14 @@ def get_json_report(experiment_id: str, request: Request, db: Session = Depends(
     ).first()
     if not record:
         raise HTTPException(404, "Experiment not found.")
-    data = _serialize_experiment(record)
+
+    if record.report_json:
+        data = record.report_json
+    else:
+        data = _serialize_experiment(record)
+        record.report_json = data
+        db.commit()
+
     return StreamingResponse(
         iter([json.dumps(data, indent=2)]),
         media_type="application/json",

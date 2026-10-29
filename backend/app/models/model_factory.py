@@ -688,11 +688,24 @@ def get_available_models() -> List[Dict]:
                     {"name": "learning_rate", "label": "Learning Rate", "type": "float", "default": 0.001, "min": 0.0001, "max": 0.1},
                 ],
             })
+
+    from app.core.config import LIGHT_MODE
+    if LIGHT_MODE:
+        for m in models:
+            if m["id"] in {"pytorch_mlp", "tabnet", "ft_transformer"}:
+                m["disabled"] = True
+                m["disabled_reason"] = "Not available in light mode"
+
     return models
 
 
 def build_model(model_id: str, task_type: str, model_config: Dict[str, Any]):
     """Factory: return initialized model wrapper."""
+    from app.core.config import LIGHT_MODE
+
+    if LIGHT_MODE and model_id in {"pytorch_mlp", "tabnet", "ft_transformer"}:
+        raise ValueError(f"Model '{model_id}' is not available in light mode.")
+
     from sklearn.ensemble import (
         GradientBoostingClassifier,
         GradientBoostingRegressor,
@@ -722,24 +735,36 @@ def build_model(model_id: str, task_type: str, model_config: Dict[str, Any]):
         weights = model_config.get("weights", "uniform")
         if weights not in ("uniform", "distance"):
             raise ValueError("KNN weights must be 'uniform' or 'distance'.")
-        estimator = KNeighborsRegressor(n_neighbors=neighbors, weights=weights) if task_type in ("regression", "time_series") else KNeighborsClassifier(n_neighbors=neighbors, weights=weights, n_jobs=-1)
+        n_jobs = 1 if LIGHT_MODE else -1
+        estimator = (
+            KNeighborsRegressor(n_neighbors=neighbors, weights=weights, n_jobs=n_jobs)
+            if task_type in ("regression", "time_series")
+            else KNeighborsClassifier(n_neighbors=neighbors, weights=weights, n_jobs=n_jobs)
+        )
         return SklearnModelWrapper(estimator, task_type)
 
     elif model_id == "random_forest":
         n_est = int(model_config.get("n_estimators", 100))
         max_d = int(model_config.get("max_depth", 10)) if model_config.get("max_depth") else None
+        n_jobs = -1
+        if LIGHT_MODE:
+            n_est = min(100, n_est)
+            max_d = 12 if max_d is None else min(12, max_d)
+            n_jobs = 1
         if task_type in ("regression", "time_series"):
             est = RandomForestRegressor(n_estimators=n_est, max_depth=max_d,
                                         min_samples_split=int(model_config.get("min_samples_split", 2)),
-                                        random_state=seed, n_jobs=-1)
+                                        random_state=seed, n_jobs=n_jobs)
         else:
             est = RandomForestClassifier(n_estimators=n_est, max_depth=max_d,
                                           min_samples_split=int(model_config.get("min_samples_split", 2)),
-                                          random_state=seed, n_jobs=-1)
+                                          random_state=seed, n_jobs=n_jobs)
         return SklearnModelWrapper(est, task_type)
 
     elif model_id == "gradient_boosting":
         n_est = int(model_config.get("n_estimators", 100))
+        if LIGHT_MODE:
+            n_est = min(100, n_est)
         lr = float(model_config.get("learning_rate", 0.1))
         max_d = int(model_config.get("max_depth", 3))
         if task_type in ("regression", "time_series"):
@@ -754,20 +779,26 @@ def build_model(model_id: str, task_type: str, model_config: Dict[str, Any]):
         import xgboost as xgb
 
         n_est = int(model_config.get("n_estimators", 100))
+        n_jobs = 1 if LIGHT_MODE else -1
+        if LIGHT_MODE:
+            n_est = min(100, n_est)
         max_d = int(model_config.get("max_depth", 6))
         lr = float(model_config.get("learning_rate", 0.1))
         subsample = float(model_config.get("subsample", 0.8))
         if task_type == "binary_classification":
             est = xgb.XGBClassifier(n_estimators=n_est, max_depth=max_d, learning_rate=lr,
                                      subsample=subsample, random_state=seed,
-                                     use_label_encoder=False, eval_metric="logloss", verbosity=0)
+                                     use_label_encoder=False, eval_metric="logloss", verbosity=0,
+                                     n_jobs=n_jobs)
         elif task_type == "multiclass_classification":
             est = xgb.XGBClassifier(n_estimators=n_est, max_depth=max_d, learning_rate=lr,
                                      subsample=subsample, random_state=seed,
-                                     objective="multi:softprob", verbosity=0)
+                                     objective="multi:softprob", verbosity=0,
+                                     n_jobs=n_jobs)
         else:
             est = xgb.XGBRegressor(n_estimators=n_est, max_depth=max_d, learning_rate=lr,
-                                    subsample=subsample, random_state=seed, verbosity=0)
+                                    subsample=subsample, random_state=seed, verbosity=0,
+                                    n_jobs=n_jobs)
         return SklearnModelWrapper(est, task_type)
 
     elif model_id == "pytorch_mlp":

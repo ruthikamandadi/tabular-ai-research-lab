@@ -107,6 +107,8 @@ def create_experiment(body: ExperimentCreate, request: Request, db: Session = De
     model_info = next((m for m in available if m["id"] == body.model_id), None)
     if not model_info:
         raise HTTPException(400, f"Unknown model: {body.model_id}")
+    if model_info.get("disabled"):
+        raise HTTPException(400, model_info.get("disabled_reason") or f"Model '{body.model_id}' is disabled.")
     if body.task_type not in model_info["tasks"]:
         raise HTTPException(400, f"Model '{body.model_id}' does not support task '{body.task_type}'.")
 
@@ -133,6 +135,7 @@ def create_experiment(body: ExperimentCreate, request: Request, db: Session = De
     # Start background job
     job_config = {
         "dataset_path": dataset.filepath,
+        "dataset_id": body.dataset_id,
         "target_column": body.target_column,
         "task_type": body.task_type,
         "model_id": body.model_id,
@@ -291,21 +294,39 @@ def get_explanations(experiment_id: str, request: Request, db: Session = Depends
         raise HTTPException(404, "Experiment not found.")
     if record.status != "completed":
         raise HTTPException(400, "Experiment has not completed.")
+    if record.error_message == "model not persisted, retrain to predict":
+        raise HTTPException(400, "Model not persisted, retrain to predict.")
 
-    artifact_dir = Path(record.artifact_path)
+    from app.core.config import ARTIFACTS_DIR
+    import zipfile
+    import io
+
+    artifact_dir = Path(record.artifact_path or (ARTIFACTS_DIR / experiment_id))
     meta_path = artifact_dir / "meta.json"
+    if (not meta_path.exists() or not (artifact_dir / "preprocessor.pkl").exists()) and record.artifact_data:
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            with zipfile.ZipFile(io.BytesIO(record.artifact_data)) as zf:
+                zf.extractall(artifact_dir)
+        except Exception as exc:
+            raise HTTPException(500, f"Failed to restore model artifacts from database: {exc}")
+
     if not meta_path.exists():
         raise HTTPException(500, "Artifact metadata missing.")
 
     with open(meta_path) as f:
         meta = json.load(f)
 
+    model_file = "model.pt" if meta.get("model_type") == "pytorch_mlp" else "model.pkl"
+    if not (artifact_dir / model_file).exists():
+        raise HTTPException(400, "Model not persisted, retrain to predict.")
+
     # Load model and preprocessor
     try:
         preprocessor = joblib.load(str(artifact_dir / "preprocessor.pkl"))
         from app.models.model_factory import load_model_wrapper
         model = load_model_wrapper(
-            str(artifact_dir / ("model.pt" if meta.get("model_type") == "pytorch_mlp" else "model.pkl")),
+            str(artifact_dir / model_file),
             meta.get("model_type", "sklearn"),
         )
     except Exception as e:
@@ -319,7 +340,17 @@ def get_explanations(experiment_id: str, request: Request, db: Session = Depends
     if not dataset:
         raise HTTPException(404, "Original dataset not found.")
 
-    df = pd.read_csv(dataset.filepath)
+    dataset_file = Path(dataset.filepath)
+    if not dataset_file.exists() and dataset.file_content:
+        dataset_file.parent.mkdir(parents=True, exist_ok=True)
+        dataset_file.write_bytes(dataset.file_content)
+
+    if dataset_file.exists():
+        df = pd.read_csv(str(dataset_file), low_memory=False)
+    elif dataset.file_content:
+        df = pd.read_csv(io.BytesIO(dataset.file_content), low_memory=False)
+    else:
+        raise HTTPException(404, "Original dataset file not found.")
     input_cols = meta.get("input_feature_cols", [])
     X = df[input_cols].head(1000)  # sample for speed
     X_transformed = preprocessor.transform(X)

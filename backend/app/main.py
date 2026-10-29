@@ -45,7 +45,27 @@ def root():
 @app.on_event("startup")
 def startup_event():
     init_db()
+    _mark_interrupted_experiments_on_startup()
     _create_sample_datasets()
+
+
+def _mark_interrupted_experiments_on_startup():
+    """Mark runs left running or pending when the server died as failed: server restarted."""
+    from app.core.database import SessionLocal, ExperimentRecord
+    db = SessionLocal()
+    try:
+        interrupted = db.query(ExperimentRecord).filter(
+            ExperimentRecord.status.in_(["running", "pending"])
+        ).all()
+        for exp in interrupted:
+            exp.status = "failed: server restarted"
+            exp.error_message = "Training was interrupted. Please try again with fewer rows."
+        if interrupted:
+            db.commit()
+    except Exception:
+        db.rollback()
+    finally:
+        db.close()
 
 
 def _create_sample_datasets():

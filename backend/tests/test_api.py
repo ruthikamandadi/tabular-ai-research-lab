@@ -1468,3 +1468,164 @@ def test_repeated_registration_returns_clear_message(unauthenticated_client):
     assert reg_2.json()["detail"] == "This email is already registered. Please sign in."
 
 
+def test_dataset_reconstituted_from_database_when_file_deleted(client):
+    from pathlib import Path
+    from app.core.database import SessionLocal, DatasetRecord
+
+    dataset = upload_dataset(client, "db_backed_data.csv", classification_rows(40))
+    ds_id = dataset["id"]
+
+    db = SessionLocal()
+    record = db.query(DatasetRecord).filter(DatasetRecord.id == ds_id).first()
+    assert record.file_content is not None
+    assert len(record.file_content) > 0
+    filepath = Path(record.filepath)
+    db.close()
+
+    # Simulate container restart wiping ephemeral disk
+    if filepath.exists():
+        filepath.unlink()
+    assert not filepath.exists()
+
+    # Preview should restore the file from DB and succeed
+    preview_res = client.get(f"/api/datasets/{ds_id}/preview")
+    assert preview_res.status_code == 200
+    assert len(preview_res.json()["rows"]) == 40
+
+    # Download should serve the CSV directly
+    dl_res = client.get(f"/api/datasets/{ds_id}/download")
+    assert dl_res.status_code == 200
+    assert b"feature_a" in dl_res.content
+
+
+def test_model_artifact_reconstituted_from_database_when_dir_deleted(client):
+    from pathlib import Path
+    import shutil
+    from app.core.database import SessionLocal, ExperimentRecord
+
+    dataset = upload_dataset(client, "db_model_data.csv", classification_rows(50))
+    exp_res = client.post(
+        "/api/experiments",
+        json={
+            "dataset_id": dataset["id"],
+            "target_column": "target",
+            "task_type": "binary_classification",
+            "model_id": "logistic_regression",
+            "model_config": {"max_iter": 100},
+            "preprocessing_config": {"test_size": 0.2},
+            "random_seed": 42,
+        },
+    )
+    assert exp_res.status_code == 200
+    exp_id = exp_res.json()["experiment_id"]
+
+    # Wait for completion
+    st = None
+    for _ in range(50):
+        st = client.get(f"/api/experiments/{exp_id}/status").json()
+        if st["status"] in ("completed", "failed"):
+            break
+        time.sleep(0.1)
+
+    assert st["status"] == "completed"
+
+    db = SessionLocal()
+    exp_rec = db.query(ExperimentRecord).filter(ExperimentRecord.id == exp_id).first()
+    assert exp_rec.artifact_data is not None
+    assert len(exp_rec.artifact_data) > 0
+    assert exp_rec.report_html is not None
+    assert exp_rec.report_json is not None
+    artifact_path = Path(exp_rec.artifact_path)
+    db.close()
+
+    # Simulate container restart wiping ephemeral disk
+    if artifact_path.exists():
+        shutil.rmtree(artifact_path, ignore_errors=True)
+    assert not artifact_path.exists()
+
+    # Single-row prediction reconstitutes artifacts from DB and succeeds
+    pred_res = client.post(
+        f"/api/models/{exp_id}/predict-single",
+        json={"features": {"feature_a": 0.5, "feature_b": 1.0}},
+    )
+    assert pred_res.status_code == 200
+    assert "prediction" in pred_res.json()
+
+    # Reports work and download properly
+    html_res = client.get(f"/api/reports/{exp_id}/html")
+    assert html_res.status_code == 200
+    assert "Experiment Report" in html_res.text
+
+
+def test_startup_marks_running_jobs_as_interrupted():
+    from app.core.database import SessionLocal, ExperimentRecord
+    from app.main import _mark_interrupted_experiments_on_startup
+
+    db = SessionLocal()
+    orphaned_exp = ExperimentRecord(
+        id="orphaned-test-run-123",
+        owner_id="primary-user",
+        dataset_id="ds-1",
+        dataset_name="Test DS",
+        target_column="target",
+        task_type="binary_classification",
+        model_name="Random Forest",
+        status="running",
+    )
+    db.add(orphaned_exp)
+    db.commit()
+    db.close()
+
+    # Trigger startup hook
+    _mark_interrupted_experiments_on_startup()
+
+    db = SessionLocal()
+    updated = db.query(ExperimentRecord).filter(ExperimentRecord.id == "orphaned-test-run-123").first()
+    assert updated.status == "failed: server restarted"
+    assert "interrupted" in updated.error_message.lower()
+    db.delete(updated)
+    db.commit()
+    db.close()
+
+
+def test_storage_summary_endpoint(client):
+    res = client.get("/api/settings/storage")
+    assert res.status_code == 200
+    data = res.json()
+    assert "used_mb" in data
+    assert "limit_mb" in data
+    assert data["limit_mb"] == 300
+    assert "backend" in data
+    assert "datasets_count" in data
+    assert "experiments_count" in data
+
+
+def test_light_mode_disabled_models(monkeypatch, client):
+    import app.core.config as config
+
+    monkeypatch.setattr(config, "LIGHT_MODE", True)
+
+    models = client.get("/api/experiments/models/available").json()
+    torch_models = [m for m in models if m["id"] in ("pytorch_mlp", "tabnet", "ft_transformer")]
+    for tm in torch_models:
+        assert tm["disabled"] is True
+        assert "Not available in light mode" in tm["disabled_reason"]
+
+    # In light mode, attempting to train a torch model is rejected
+    dataset = upload_dataset(client, "light_mode_ds.csv", classification_rows(30))
+    res = client.post(
+        "/api/experiments",
+        json={
+            "dataset_id": dataset["id"],
+            "target_column": "target",
+            "task_type": "binary_classification",
+            "model_id": "pytorch_mlp",
+            "model_config": {},
+            "preprocessing_config": {"test_size": 0.2},
+            "random_seed": 42,
+        },
+    )
+    assert res.status_code == 400
+    assert "not available in light mode" in res.json()["detail"].lower()
+
+

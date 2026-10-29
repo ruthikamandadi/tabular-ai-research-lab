@@ -33,13 +33,33 @@ def _load_model_and_meta(experiment_id: str, owner_id: str, db: Session):
     if record.status != "completed":
         raise HTTPException(400, "Experiment has not completed.")
 
-    artifact_dir = Path(record.artifact_path)
+    if record.error_message == "model not persisted, retrain to predict":
+        raise HTTPException(400, "Model not persisted, retrain to predict.")
+
+    from app.core.config import ARTIFACTS_DIR
+    import zipfile
+
+    artifact_dir = Path(record.artifact_path or (ARTIFACTS_DIR / experiment_id))
     meta_path = artifact_dir / "meta.json"
+
+    # Reconstruct from DB if ephemeral disk was cleared after server restart
+    if (not meta_path.exists() or not (artifact_dir / "preprocessor.pkl").exists()) and record.artifact_data:
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            with zipfile.ZipFile(io.BytesIO(record.artifact_data)) as zf:
+                zf.extractall(artifact_dir)
+        except Exception as exc:
+            raise HTTPException(500, f"Failed to restore model artifacts from database: {exc}")
+
     if not meta_path.exists():
         raise HTTPException(500, "Artifact metadata missing.")
 
     with open(meta_path) as f:
         meta = json.load(f)
+
+    model_file = "model.pt" if meta.get("model_type") == "pytorch_mlp" else "model.pkl"
+    if not (artifact_dir / model_file).exists():
+        raise HTTPException(400, "Model not persisted, retrain to predict.")
 
     preprocessor = joblib.load(str(artifact_dir / "preprocessor.pkl"))
     label_encoder = None
@@ -49,7 +69,7 @@ def _load_model_and_meta(experiment_id: str, owner_id: str, db: Session):
 
     from app.models.model_factory import load_model_wrapper
     model = load_model_wrapper(
-        str(artifact_dir / ("model.pt" if meta.get("model_type") == "pytorch_mlp" else "model.pkl")),
+        str(artifact_dir / model_file),
         meta.get("model_type", "sklearn"),
     )
 

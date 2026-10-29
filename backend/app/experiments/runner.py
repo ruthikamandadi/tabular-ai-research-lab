@@ -5,13 +5,18 @@ import time
 import threading
 import traceback
 import math
+import os
+import io
+import gc
+import zipfile
+from pathlib import Path
 import numpy as np
 import joblib
 import json
 from typing import Dict, Any, Optional
 
-from app.core.config import ARTIFACTS_DIR
-from app.core.database import SessionLocal, ExperimentRecord
+from app.core.config import ARTIFACTS_DIR, LIGHT_MODE, MAX_TRAIN_ROWS, MAX_MODEL_SIZE_MB
+from app.core.database import SessionLocal, ExperimentRecord, DatasetRecord, enforce_user_quota
 from app.preprocessing.pipeline import build_preprocessing_pipeline
 from app.models.model_factory import build_model, get_torch
 from app.evaluation.metrics import compute_metrics
@@ -24,6 +29,9 @@ from sklearn.metrics import get_scorer
 # In-memory job store (progress tracking)
 _jobs: Dict[str, Dict] = {}
 _jobs_lock = threading.Lock()
+
+# Light mode queue semaphore: train ONE model at a time, never in parallel
+_light_mode_semaphore = threading.Semaphore(1)
 
 
 def get_job(job_id: str) -> Optional[Dict]:
@@ -48,17 +56,17 @@ def _search_space(model_id: str) -> Dict[str, list]:
             "max_iter": [500, 1000],
         },
         "random_forest": {
-            "n_estimators": [100, 200],
-            "max_depth": [None, 10, 20],
+            "n_estimators": [50, 100] if LIGHT_MODE else [100, 200],
+            "max_depth": [6, 12] if LIGHT_MODE else [None, 10, 20],
             "min_samples_split": [2, 5],
         },
         "gradient_boosting": {
-            "n_estimators": [100, 200],
+            "n_estimators": [50, 100] if LIGHT_MODE else [100, 200],
             "learning_rate": [0.03, 0.1],
-            "max_depth": [2, 3, 5],
+            "max_depth": [2, 3],
         },
         "xgboost": {
-            "n_estimators": [100, 200],
+            "n_estimators": [50, 100] if LIGHT_MODE else [100, 200],
             "max_depth": [3, 6],
             "learning_rate": [0.03, 0.1],
             "subsample": [0.7, 1.0],
@@ -149,6 +157,7 @@ def _run_tuning(model, model_id, task_type, model_config, X_train, y_train, job_
     else:
         X_search, y_search = X_train, y_train
 
+    cv_n_jobs = 1 if LIGHT_MODE else -1
     trials = []
     if method == "optuna":
         study = optuna.create_study(direction="maximize")
@@ -161,7 +170,7 @@ def _run_tuning(model, model_id, task_type, model_config, X_train, y_train, job_
             candidate = build_model(model_id, task_type, {**model_config, **params}).estimator
             from sklearn.model_selection import cross_val_score
             score = float(np.mean(cross_val_score(
-                candidate, X_search, y_search, cv=splitter, scoring=scoring, n_jobs=-1,
+                candidate, X_search, y_search, cv=splitter, scoring=scoring, n_jobs=cv_n_jobs,
             )))
             trial.set_user_attr("params", _json_value(params))
             _update_job(job_id, progress=min(75, 30 + int(45 * (trial.number + 1) / n_iter)),
@@ -184,7 +193,7 @@ def _run_tuning(model, model_id, task_type, model_config, X_train, y_train, job_
             "param_grid" if method == "grid" else "param_distributions": search_space,
             "scoring": scoring,
             "cv": splitter,
-            "n_jobs": -1,
+            "n_jobs": cv_n_jobs,
             "refit": True,
             "error_score": "raise",
         }
@@ -218,18 +227,66 @@ def run_training_job(experiment_id: str, job_config: Dict[str, Any]):
     job_id = experiment_id
 
     def _worker():
+        # In light mode, ensure training jobs execute one at a time
+        if LIGHT_MODE:
+            _update_job(job_id, status="pending", message="Waiting in queue for previous training job to complete...")
+            acquired = _light_mode_semaphore.acquire(blocking=True)
+        else:
+            acquired = False
+
         db = SessionLocal()
         try:
             _update_job(job_id, status="running", progress=5, message="Loading dataset...")
 
-            # 1. Load dataset
-            dataset_path = job_config["dataset_path"]
-            df = pd.read_csv(dataset_path, low_memory=False)
+            # 1. Load dataset (reconstitute from DB if missing on disk after server restart)
+            dataset_path = job_config.get("dataset_path", "")
+            dataset_id = job_config.get("dataset_id")
+            dataset_record = None
+            if dataset_id:
+                dataset_record = db.query(DatasetRecord).filter(DatasetRecord.id == dataset_id).first()
+
+            if (not os.path.exists(dataset_path) or os.path.getsize(dataset_path) == 0) and dataset_record and dataset_record.file_content:
+                Path(dataset_path).parent.mkdir(parents=True, exist_ok=True)
+                with open(dataset_path, "wb") as f:
+                    f.write(dataset_record.file_content)
+
+            if os.path.exists(dataset_path):
+                df = pd.read_csv(dataset_path, low_memory=False)
+            elif dataset_record and dataset_record.file_content:
+                df = pd.read_csv(io.BytesIO(dataset_record.file_content), low_memory=False)
+            else:
+                raise FileNotFoundError(f"Dataset file could not be found at {dataset_path}")
+
             job_config["dataset_rows"] = len(df)
             deep_model = job_config["model_id"] in {"pytorch_mlp", "tabnet", "ft_transformer"}
             torch_module = get_torch() if deep_model else None
             use_cuda = bool(torch_module and torch_module.cuda.is_available())
-            if len(df) > 100_000 and (not deep_model or not use_cuda):
+
+            # Sampling for Light Mode or Large Datasets
+            if LIGHT_MODE and len(df) > MAX_TRAIN_ROWS:
+                orig_len = len(df)
+                if job_config["task_type"] == "time_series":
+                    df = df.tail(MAX_TRAIN_ROWS)
+                elif job_config["task_type"] in ("binary_classification", "multiclass_classification"):
+                    from sklearn.model_selection import train_test_split
+                    target_col = job_config.get("target_column")
+                    try:
+                        df, _ = train_test_split(
+                            df,
+                            train_size=MAX_TRAIN_ROWS,
+                            stratify=df[target_col] if target_col in df.columns else None,
+                            random_state=job_config.get("random_seed", 42),
+                        )
+                    except Exception:
+                        df = df.sample(MAX_TRAIN_ROWS, random_state=job_config.get("random_seed", 42))
+                else:
+                    df = df.sample(MAX_TRAIN_ROWS, random_state=job_config.get("random_seed", 42))
+                _update_job(
+                    job_id,
+                    warning=f"Light mode: dataset sampled from {orig_len} to {len(df)} rows for memory safety.",
+                    message=f"Dataset sampled to {len(df)} rows (light mode).",
+                )
+            elif not LIGHT_MODE and len(df) > 100_000 and (not deep_model or not use_cuda):
                 if job_config["task_type"] == "time_series":
                     df = df.tail(100_000)
                 else:
@@ -267,6 +324,13 @@ def run_training_job(experiment_id: str, job_config: Dict[str, Any]):
             class_names = prep_result["class_names"]
             preprocessor = prep_result["preprocessor"]
             label_encoder = prep_result["label_encoder"]
+
+            # Skip KNN above 10,000 rows
+            if job_config["model_id"] == "knn" and len(X_train) > 10000:
+                raise ValueError(
+                    f"KNN is skipped when training rows exceed 10,000 (got {len(X_train)} rows). "
+                    "Please choose another model or reduce dataset size."
+                )
 
             _update_job(job_id, progress=30, message="Training model...")
 
@@ -372,6 +436,22 @@ def run_training_job(experiment_id: str, job_config: Dict[str, Any]):
             with open(str(artifact_dir / "meta.json"), "w") as f:
                 json.dump(meta, f, indent=2)
 
+            # Check model size for DB persistence (max 20MB)
+            max_model_bytes = MAX_MODEL_SIZE_MB * 1024 * 1024
+            model_size = Path(model_path).stat().st_size
+            model_persisted = model_size <= max_model_bytes
+
+            zip_buffer = io.BytesIO()
+            with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+                zf.write(str(artifact_dir / "meta.json"), arcname="meta.json")
+                zf.write(str(artifact_dir / "preprocessor.pkl"), arcname="preprocessor.pkl")
+                if (artifact_dir / "label_encoder.pkl").exists():
+                    zf.write(str(artifact_dir / "label_encoder.pkl"), arcname="label_encoder.pkl")
+                if model_persisted:
+                    zf.write(model_path, arcname=Path(model_path).name)
+
+            artifact_bytes = zip_buffer.getvalue()
+
             # 7. Persist to DB
             exp = db.query(ExperimentRecord).filter(ExperimentRecord.id == experiment_id).first()
             if exp:
@@ -383,12 +463,30 @@ def run_training_job(experiment_id: str, job_config: Dict[str, Any]):
                 exp.n_test_rows = int(len(X_test))
                 exp.status = "completed"
                 exp.artifact_path = str(artifact_dir)
+                exp.artifact_data = artifact_bytes
+                if not model_persisted:
+                    exp.error_message = "model not persisted, retrain to predict"
+                    _update_job(
+                        job_id,
+                        warning=f"Model exceeds {MAX_MODEL_SIZE_MB} MB limit; metrics saved but model artifact was not persisted to database.",
+                    )
                 exp.training_history = training_history
                 exp.best_params = best_params or None
                 exp.best_cv_score = best_cv_score
                 exp.tuning_trials = tuning_trials or None
                 exp.forecast_data = forecast_data
+
+                # Persist HTML and JSON report in DB
+                try:
+                    from app.api.reports import _build_html_report
+                    from app.api.experiments import _serialize_experiment
+                    exp.report_html = _build_html_report(exp)
+                    exp.report_json = _serialize_experiment(exp)
+                except Exception:
+                    pass
+
                 db.commit()
+                enforce_user_quota(exp.owner_id, db)
 
             _update_job(
                 job_id,
@@ -417,7 +515,15 @@ def run_training_job(experiment_id: str, job_config: Dict[str, Any]):
                 exp.error_message = str(e)
                 db.commit()
         finally:
+            # Memory cleanup and release lock
+            try:
+                del model, X_train, X_test, y_train, y_test, df
+            except Exception:
+                pass
+            gc.collect()
             db.close()
+            if acquired:
+                _light_mode_semaphore.release()
 
     with _jobs_lock:
         _jobs[job_id] = {

@@ -80,7 +80,7 @@ api.interceptors.response.use(
     normalizedError.code = err.code;
     if (err.response?.status === 401) {
       const url = err.config?.url || '';
-      if (!url.includes('/auth/login') && !url.includes('/auth/register')) {
+      if (url.includes('/auth/me')) {
         window.dispatchEvent(new CustomEvent('auth:unauthorized'));
       }
     }
@@ -210,4 +210,5 @@ export const importKaggleDataset = (payload) => api.post('/kaggle/import', paylo
 export const getSynthesisMethods = () => api.get('/datasets/synthesis/methods');
 export const synthesizeDataset = (datasetId, payload) => api.post(`/datasets/${datasetId}/synthesize`, payload);
 export const getSynthesisStatus = (jobId) => api.get(`/datasets/synthesis/${jobId}/status`);
+export const getStorageStats = () => api.get('/settings/storage');
 export default api;

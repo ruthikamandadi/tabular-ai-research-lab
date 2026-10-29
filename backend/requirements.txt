@@ -22,6 +22,7 @@ copulas==0.14.1
 
 # Persistence and tests
 SQLAlchemy==2.1.5
+psycopg[binary]
 pytest==9.1.1
 httpx==0.28.1
 httpx2==2.16.0

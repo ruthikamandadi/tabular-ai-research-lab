@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Info, BookOpen, ExternalLink, RefreshCw, CheckCircle, AlertTriangle, AlertCircle, KeyRound } from 'lucide-react';
-import { getCapabilities, saveKaggleCredentials, testKaggleConnection } from '../services/api';
+import { Info, BookOpen, ExternalLink, RefreshCw, CheckCircle, AlertTriangle, AlertCircle, KeyRound, Database } from 'lucide-react';
+import { getCapabilities, saveKaggleCredentials, testKaggleConnection, getStorageStats } from '../services/api';
 import HelpTooltip from '../components/HelpTooltip';
 
 export default function SettingsPage() {
@@ -15,6 +15,24 @@ export default function SettingsPage() {
   const [kaggleError, setKaggleError] = useState('');
   const [kaggleBusy, setKaggleBusy] = useState(false);
   const [kaggleTesting, setKaggleTesting] = useState(false);
+  const [storage, setStorage] = useState(null);
+  const [storageLoading, setStorageLoading] = useState(true);
+
+  const loadStorage = useCallback(async () => {
+    try {
+      setStorageLoading(true);
+      const res = await getStorageStats();
+      setStorage(res.data);
+    } catch {
+      // ignore
+    } finally {
+      setStorageLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadStorage();
+  }, [loadStorage]);
 
   const loadCapabilities = useCallback(async (refresh = false) => {
     const requestId = ++loadRequestId.current;
@@ -123,13 +141,64 @@ export default function SettingsPage() {
             </div>
             <div className="flex justify-between py-2 border-b border-slate-100">
               <span className="text-slate-500">Storage</span>
-              <span className="font-medium">SQLite + Local Files</span>
+              <span className="font-medium">{storage?.backend || 'SQLite + Local Files'}</span>
             </div>
             <div className="flex justify-between py-2">
               <span className="text-slate-500">Boost Library</span>
               <span className="font-medium">XGBoost 3.4</span>
             </div>
           </div>
+        </div>
+
+        <div className="card">
+          <div className="flex items-center justify-between gap-3 mb-3">
+            <h2 className="section-title flex items-center gap-2 mb-0">
+              <Database size={16} className="text-blue-500" />
+              Storage & Quota
+            </h2>
+            <button onClick={loadStorage} disabled={storageLoading} className="btn-secondary text-xs">
+              <RefreshCw size={12} className={storageLoading ? 'animate-spin' : ''} /> Refresh
+            </button>
+          </div>
+          {storageLoading && !storage ? (
+            <div className="text-sm text-slate-500 py-4 flex items-center gap-2">
+              <RefreshCw size={14} className="animate-spin" /> Loading storage metrics...
+            </div>
+          ) : storage ? (
+            <div className="space-y-3 text-sm">
+              <div className="flex justify-between py-1.5 border-b border-slate-100">
+                <span className="text-slate-500">Database Backend</span>
+                <span className="font-semibold text-slate-800">{storage.backend}</span>
+              </div>
+              <div className="flex justify-between py-1.5 border-b border-slate-100">
+                <span className="text-slate-500">Storage Used</span>
+                <span className="font-semibold text-slate-800">
+                  {storage.used_mb} MB / {storage.limit_mb} MB ({storage.percent_used}%)
+                </span>
+              </div>
+              <div className="w-full bg-slate-100 rounded-full h-2 my-1 overflow-hidden">
+                <div
+                  className={`h-2 rounded-full ${
+                    storage.percent_used > 85 ? 'bg-red-500' : storage.percent_used > 60 ? 'bg-amber-500' : 'bg-blue-500'
+                  }`}
+                  style={{ width: `${Math.min(100, Math.max(0, storage.percent_used))}%` }}
+                />
+              </div>
+              <div className="flex justify-between py-1.5 border-b border-slate-100">
+                <span className="text-slate-500">Datasets Stored</span>
+                <span className="font-medium">{storage.datasets_count}</span>
+              </div>
+              <div className="flex justify-between py-1.5">
+                <span className="text-slate-500">Experiments Stored</span>
+                <span className="font-medium">{storage.experiments_count}</span>
+              </div>
+              <p className="text-xs text-slate-400 mt-1">
+                Storage quota automatically cleans up oldest records if usage exceeds the limit.
+              </p>
+            </div>
+          ) : (
+            <div className="text-sm text-slate-500">Storage stats currently unavailable.</div>
+          )}
         </div>
 
         <div className="card">

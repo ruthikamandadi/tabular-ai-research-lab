@@ -1,16 +1,19 @@
-"""Runtime capability reporting for the Settings page."""
+"""Runtime capability reporting and storage endpoints for the Settings page."""
 import importlib.util
 import inspect
 import json
 import logging
 import threading
 
-from fastapi import APIRouter
-from fastapi import HTTPException
+from fastapi import APIRouter, HTTPException, Depends, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
 
 from app.api import datasets, experiments, kaggle
+from app.core.database import get_db, get_user_storage_summary
+from app.core.auth import request_user_id, require_authenticated_user
+from app.core.config import LIGHT_MODE
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 logger = logging.getLogger(__name__)
@@ -22,6 +25,12 @@ _CACHE_LOCK = threading.Lock()
 class KaggleCredentialsRequest(BaseModel):
     username: str = Field(min_length=1, max_length=100)
     key: str = Field(min_length=1, max_length=256)
+
+
+@router.get("/storage")
+def get_storage(request: Request, db: Session = Depends(get_db), user=Depends(require_authenticated_user)):
+    """Return storage usage and limit for the authenticated user."""
+    return get_user_storage_summary(user.id, db)
 
 
 @router.post("/kaggle")
@@ -198,6 +207,17 @@ def _check_synthetic_data():
     imblearn_ready = _module_available("imblearn")
     sdv_ready = _module_available("sdv")
     available = route_ready and callable(getattr(datasets, "_make_bootstrap", None))
+    if LIGHT_MODE:
+        note = "Bootstrap generation is available."
+        note += " SMOTE is available." if imblearn_ready else " SMOTE requires imbalanced-learn."
+        note += " CTGAN is not available in light mode."
+        return {
+            "key": "synthetic_data",
+            "label": "Synthetic data (CTGAN and SMOTE)",
+            "available": available,
+            "note": note,
+            "install": None,
+        }
     note = "Bootstrap generation is available."
     note += " SMOTE is available." if imblearn_ready else " SMOTE requires imbalanced-learn."
     note += " CTGAN and Gaussian Copula are available." if sdv_ready else " CTGAN and Gaussian Copula require SDV."
@@ -211,6 +231,14 @@ def _check_synthetic_data():
 
 
 def _check_deep_models():
+    if LIGHT_MODE:
+        return {
+            "key": "deep_models",
+            "label": "TabNet and FT-Transformer",
+            "available": False,
+            "note": "Not available in light mode.",
+            "install": None,
+        }
     packages_ready = all(
         _module_available(package)
         for package in ("torch", "pytorch_tabnet", "rtdl_revisiting_models")
